@@ -26,6 +26,11 @@ pub enum AppEvent {
     InputCancel,
     ConfirmYes,
     ConfirmNo,
+    EnterMoveMode,
+    DragMoveFocus(i32),
+    DragMoveCursor(i32),
+    DragCommit,
+    DragCancel,
     None,
 }
 
@@ -45,6 +50,7 @@ fn translate_key(mode: &Mode, key: KeyEvent) -> AppEvent {
         Mode::Normal => translate_normal_key(key),
         Mode::Input(_) => translate_input_key(key),
         Mode::Confirm(_) => translate_confirm_key(key),
+        Mode::Dragging(_) => translate_dragging_key(key),
     }
 }
 
@@ -63,6 +69,7 @@ fn translate_normal_key(key: KeyEvent) -> AppEvent {
         KeyCode::Char('r') => AppEvent::RenameContextual,
         KeyCode::Char('x') => AppEvent::KillContextual,
         KeyCode::Char('z') => AppEvent::ZoomContextual,
+        KeyCode::Char(' ') | KeyCode::Char('m') => AppEvent::EnterMoveMode,
         KeyCode::Char('q') | KeyCode::Esc => AppEvent::Quit,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => AppEvent::Quit,
         _ => AppEvent::None,
@@ -85,6 +92,18 @@ fn translate_confirm_key(key: KeyEvent) -> AppEvent {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => AppEvent::ConfirmYes,
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => AppEvent::ConfirmNo,
+        _ => AppEvent::None,
+    }
+}
+
+fn translate_dragging_key(key: KeyEvent) -> AppEvent {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => AppEvent::DragMoveCursor(-1),
+        KeyCode::Down | KeyCode::Char('j') => AppEvent::DragMoveCursor(1),
+        KeyCode::Left | KeyCode::Char('h') => AppEvent::DragMoveFocus(-1),
+        KeyCode::Right | KeyCode::Char('l') => AppEvent::DragMoveFocus(1),
+        KeyCode::Enter => AppEvent::DragCommit,
+        KeyCode::Esc => AppEvent::DragCancel,
         _ => AppEvent::None,
     }
 }

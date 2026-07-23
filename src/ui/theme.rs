@@ -62,8 +62,7 @@ impl Theme {
     pub fn active(&self) -> Color {
         self.green
     }
-    /// Drag/drop accent (§8.1); consumed starting M2's move-mode highlighting.
-    #[allow(dead_code)]
+    /// Drag/drop accent (§8.1).
     pub fn accent(&self) -> Color {
         self.blue
     }

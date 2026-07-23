@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tmux::ids::{PaneId, SessionId, WindowId};
+use crate::ui::drag::DragItem;
 use crate::ui::theme::Theme;
 
 const TOAST_LIFETIME: Duration = Duration::from_secs(3);
@@ -18,12 +19,15 @@ pub enum InputKind {
     RenameSession(SessionId),
     RenameWindow(WindowId),
     RenamePaneTitle(PaneId),
+    /// Committed a drag onto "+ new session" (§6.5) — carries the dragged item
+    /// so the new-session recipe can run once the name is confirmed.
+    NewSessionFromDrag(DragItem),
 }
 
 impl InputKind {
     pub fn label(&self) -> &'static str {
         match self {
-            InputKind::NewSession => "new session name",
+            InputKind::NewSession | InputKind::NewSessionFromDrag(_) => "new session name",
             InputKind::RenameSession(_) => "rename session",
             InputKind::RenameWindow(_) => "rename window",
             InputKind::RenamePaneTitle(_) => "pane title",

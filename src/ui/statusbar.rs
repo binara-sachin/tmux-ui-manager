@@ -28,14 +28,25 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 /// Footer row: context-sensitive key hints (§6.1) — switches with `app.mode`.
-/// Move-mode/drag hints are added in M2/M3.
+/// While dragging, the live "what would happen" sentence is the primary safety
+/// mechanism (§6.5) — it's derived from `App::describe_planned_action`, the
+/// same value `commit_drag` acts on, so they can't diverge. Mouse/hover hints
+/// land in M3.
 pub fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let hint = match &app.mode {
         Mode::Normal => {
-            "\u{21b5} attach  n new  r rename  x kill  z zoom   \u{2191}\u{2193}/jk move   \u{2190}\u{2192}/hl \u{b7} tab focus   g/G top/bottom   q quit"
+            "\u{21b5} attach  n new  r rename  x kill  z zoom  space/m move   \u{2191}\u{2193}/jk   \u{2190}\u{2192}/hl \u{b7} tab focus   g/G top/bottom   q quit"
+                .to_string()
         }
-        Mode::Input(_) => "\u{21b5} confirm   Esc cancel",
-        Mode::Confirm(_) => "y yes   n/Esc no",
+        Mode::Input(_) => "\u{21b5} confirm   Esc cancel".to_string(),
+        Mode::Confirm(_) => "y yes   n/Esc no".to_string(),
+        Mode::Dragging(_) => {
+            let action = app.plan_current_drop();
+            match app.describe_planned_action(&action) {
+                Some(desc) => format!("drop: {desc}   \u{b7}   Esc cancel"),
+                None => "drop: (no-op here)   \u{b7}   Esc cancel".to_string(),
+            }
+        }
     };
     let line = Line::from(Span::styled(hint, Style::default().fg(theme.meta())));
     frame.render_widget(

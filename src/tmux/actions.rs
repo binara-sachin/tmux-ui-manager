@@ -38,6 +38,27 @@ fn run_tmux(args: &[&str]) -> Result<(), ActionError> {
     }
 }
 
+/// Like `run_tmux` but returns trimmed stdout on success — used by the
+/// new-session recipe to resolve the freshly created session/window's ids.
+fn tmux_output(args: &[&str]) -> Result<String, ActionError> {
+    let output = Command::new("tmux")
+        .args(args)
+        .output()
+        .map_err(|e| ActionError {
+            command: format!("tmux {}", args.join(" ")),
+            stderr: e.to_string(),
+        })?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(ActionError {
+            command: format!("tmux {}", args.join(" ")),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
 /// Attach/jump to a session (§5 row 1). Caller exits the process on success to
 /// close the popup.
 pub fn attach_session(id: &SessionId) -> Result<(), ActionError> {
@@ -109,4 +130,119 @@ pub fn kill_pane(id: &PaneId) -> Result<(), ActionError> {
 /// Zoom/unzoom pane (§5 row 13).
 pub fn toggle_zoom(id: &PaneId) -> Result<(), ActionError> {
     run_tmux(&["resize-pane", "-Z", "-t", id.as_target()])
+}
+
+/// Window → append into session T (§5, drag row "Move window → session T").
+pub fn move_window_to_session(window: &WindowId, session: &SessionId) -> Result<(), ActionError> {
+    let target = format!("{}:", session.as_target());
+    run_tmux(&["move-window", "-s", window.as_target(), "-t", &target])
+}
+
+/// Window reorder before/after another window, same- or cross-session (§5,
+/// drag row "Reorder window before/after window W"). Verified empirically:
+/// `-a`/`-b` work identically across sessions.
+pub fn reorder_window(
+    window: &WindowId,
+    anchor: &WindowId,
+    after: bool,
+) -> Result<(), ActionError> {
+    let flag = if after { "-a" } else { "-b" };
+    run_tmux(&[
+        "move-window",
+        flag,
+        "-s",
+        window.as_target(),
+        "-t",
+        anchor.as_target(),
+    ])
+}
+
+/// Pane → join into window W as a new split (§5).
+pub fn join_pane_into_window(pane: &PaneId, window: &WindowId) -> Result<(), ActionError> {
+    run_tmux(&[
+        "join-pane",
+        "-d",
+        "-s",
+        pane.as_target(),
+        "-t",
+        window.as_target(),
+    ])
+}
+
+/// Pane → split a specific pane Q (§5).
+pub fn join_pane_onto_pane(pane: &PaneId, target_pane: &PaneId) -> Result<(), ActionError> {
+    run_tmux(&[
+        "join-pane",
+        "-d",
+        "-s",
+        pane.as_target(),
+        "-t",
+        target_pane.as_target(),
+    ])
+}
+
+/// Pane → new window in session S (§5). `break-pane` succeeds unconditionally
+/// here — verified empirically that even when the pane is the only one in its
+/// window, `break-pane` preserves that window's id/name and simply relocates it,
+/// functionally identical to `move-window`. The doc's only-pane fallback isn't
+/// needed; there's no failure mode to fall back from.
+pub fn pane_to_new_window(pane: &PaneId, session: &SessionId) -> Result<(), ActionError> {
+    let target = format!("{}:", session.as_target());
+    run_tmux(&["break-pane", "-d", "-s", pane.as_target(), "-t", &target])
+}
+
+/// Window/pane → brand-new session recipe (§5): create a placeholder session,
+/// move/break the real item in, kill the placeholder. Rolls back (kills the
+/// just-created session) if the insert step fails, so no empty ghost session is
+/// left behind.
+fn new_session_with_recipe(
+    name: &str,
+    cwd: &str,
+    insert: impl FnOnce(&SessionId) -> Result<(), ActionError>,
+) -> Result<(), ActionError> {
+    run_tmux(&["new-session", "-d", "-s", name, "-c", cwd])?;
+
+    // The name is guaranteed unique at this instant (we just created it), so
+    // targeting by name here — the one place in this module that isn't an
+    // id — is safe.
+    let session_id = match tmux_output(&["display-message", "-p", "-t", name, "#{session_id}"]) {
+        Ok(id) => SessionId::new(id),
+        Err(e) => {
+            let _ = run_tmux(&["kill-session", "-t", name]);
+            return Err(e);
+        }
+    };
+
+    let placeholder_window = tmux_output(&[
+        "display-message",
+        "-p",
+        "-t",
+        session_id.as_target(),
+        "#{window_id}",
+    ])
+    .ok();
+
+    if let Err(e) = insert(&session_id) {
+        let _ = run_tmux(&["kill-session", "-t", session_id.as_target()]);
+        return Err(e);
+    }
+
+    if let Some(placeholder) = placeholder_window {
+        // Best-effort: the recipe already succeeded: the real content is in
+        // place, so a failure to clean up the placeholder window isn't fatal.
+        let _ = run_tmux(&["kill-window", "-t", &placeholder]);
+    }
+
+    Ok(())
+}
+
+/// Window → brand-new session (§5 recipe, driven by `move-window`).
+pub fn window_to_new_session(name: &str, cwd: &str, window: &WindowId) -> Result<(), ActionError> {
+    new_session_with_recipe(name, cwd, |session| move_window_to_session(window, session))
+}
+
+/// Pane → brand-new session (§5 recipe, driven by `break-pane`; same only-pane
+/// non-issue as `pane_to_new_window` above).
+pub fn pane_to_new_session(name: &str, cwd: &str, pane: &PaneId) -> Result<(), ActionError> {
+    new_session_with_recipe(name, cwd, |session| pane_to_new_window(pane, session))
 }

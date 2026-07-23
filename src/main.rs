@@ -101,6 +101,11 @@ fn handle_event(app: &mut App, event: Event) {
         AppEvent::InputCancel => app.input_cancel(),
         AppEvent::ConfirmYes => app.confirm_yes(),
         AppEvent::ConfirmNo => app.confirm_no(),
+        AppEvent::EnterMoveMode => app.enter_move_mode(),
+        AppEvent::DragMoveFocus(delta) => app.drag_move_focus(delta),
+        AppEvent::DragMoveCursor(delta) => app.drag_move_cursor(delta),
+        AppEvent::DragCommit => app.commit_drag(),
+        AppEvent::DragCancel => app.cancel_drag(),
         AppEvent::Redraw | AppEvent::None => {}
     }
 }
