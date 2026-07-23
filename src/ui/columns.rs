@@ -2,15 +2,26 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::model::{Pane, Session, Window};
 use crate::ui::app::{App, Column, Mode};
 use crate::ui::drag::{DragItem, DropTarget, PlannedAction};
+use crate::ui::hitmap::ClickTarget;
 use crate::ui::theme::Theme;
+
+/// One rendered row's clickable height (1, or 2 for the two-line pane rows)
+/// and the hit-map entry it registers — built in lockstep with each column's
+/// `Vec<ListItem>` so the two never drift apart.
+struct RowSpec {
+    height: u16,
+    target: ClickTarget,
+}
 
 /// Renders the three linked Miller columns (§6.1): SESSIONS -> WINDOWS -> PANES.
 pub fn render_columns(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    app.begin_frame_hit_map();
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -45,40 +56,133 @@ fn cursor_is_valid_drop(app: &App) -> bool {
     matches!(app.mode, Mode::Dragging(_)) && !matches!(app.plan_current_drop(), PlannedAction::NoOp)
 }
 
+/// Registers this frame's column-area (for scroll/hover hit-testing) and
+/// row hit-map (for click/drop resolution) in one place, so every column
+/// follows the exact same offset math the visible rows were built from.
+fn layout_column(
+    app: &App,
+    column: Column,
+    area: Rect,
+    inner: Rect,
+    specs: &[RowSpec],
+    selected_row: Option<usize>,
+) -> usize {
+    app.set_column_area(column, area);
+    let heights: Vec<u16> = specs.iter().map(|s| s.height).collect();
+    let offset = clamp_scroll(
+        app.scroll_offset(column),
+        selected_row,
+        &heights,
+        inner.height,
+    );
+    app.set_scroll_offset(column, offset);
+
+    let mut y = inner.y;
+    for spec in specs.iter().skip(offset) {
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let visible_height = spec.height.min((inner.y + inner.height).saturating_sub(y));
+        if visible_height == 0 {
+            break;
+        }
+        app.register_hit(
+            Rect::new(inner.x, y, inner.width, visible_height),
+            spec.target.clone(),
+        );
+        y += spec.height;
+    }
+    offset
+}
+
+/// Picks the smallest `offset` such that `selected` (if any) is fully within
+/// the visible window, accounting for each row's height (panes are 2 lines).
+/// Snaps down instantly if selection moved above the current offset (e.g. a
+/// keyboard jump-to-top), then walks forward one row at a time if it's below
+/// the visible window — the list is tiny, so this never loops meaningfully.
+fn clamp_scroll(
+    offset: usize,
+    selected: Option<usize>,
+    heights: &[u16],
+    visible_height: u16,
+) -> usize {
+    let Some(selected) = selected else {
+        return offset.min(heights.len());
+    };
+    let mut offset = offset.min(selected);
+    loop {
+        let mut used = 0u16;
+        let mut last_visible = offset;
+        for (i, h) in heights.iter().enumerate().skip(offset) {
+            if used + h > visible_height {
+                break;
+            }
+            used += h;
+            last_visible = i;
+        }
+        if selected <= last_visible {
+            break;
+        }
+        offset += 1;
+    }
+    offset
+}
+
 fn render_sessions(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let focused = app.focus == Column::Sessions;
     let dragging = matches!(app.mode, Mode::Dragging(_));
+    let hovered = app.hover();
     let b = block("SESSIONS".to_string(), theme);
-    let inner_width = b.inner(area).width;
+    let inner = b.inner(area);
 
-    let mut items: Vec<ListItem> = app
-        .snapshot
-        .sessions
-        .iter()
-        .map(|s| session_row(s, app, focused, inner_width, theme))
-        .collect();
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.snapshot.sessions.len() + 1);
+    let mut specs: Vec<RowSpec> = Vec::with_capacity(app.snapshot.sessions.len() + 1);
+    let mut selected_row = None;
+
+    for s in &app.snapshot.sessions {
+        let is_hovered = !dragging && hovered.as_ref() == Some(&ClickTarget::Session(s.id.clone()));
+        if app.selected_session.as_ref() == Some(&s.id) {
+            selected_row = Some(specs.len());
+        }
+        items.push(session_row(s, app, focused, inner.width, theme, is_hovered));
+        specs.push(RowSpec {
+            height: 1,
+            target: ClickTarget::Session(s.id.clone()),
+        });
+    }
 
     let on_pseudo =
         focused && dragging && matches!(app.resolve_drop_target(), Some(DropTarget::NewSessionRow));
     let pseudo_valid = on_pseudo && cursor_is_valid_drop(app);
+    let pseudo_hovered = !dragging && hovered == Some(ClickTarget::NewSessionRow);
     items.push(pseudo_row(
         "+ new session",
-        inner_width,
         theme,
         pseudo_valid,
+        pseudo_hovered,
     ));
+    specs.push(RowSpec {
+        height: 1,
+        target: ClickTarget::NewSessionRow,
+    });
 
-    frame.render_widget(List::new(items).block(b), area);
+    let offset = layout_column(app, Column::Sessions, area, inner, &specs, selected_row);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(selected_row);
+    frame.render_stateful_widget(List::new(items).block(b), area, &mut state);
 }
 
 fn render_windows(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let focused = app.focus == Column::Windows;
+    let dragging = matches!(app.mode, Mode::Dragging(_));
+    let hovered = app.hover();
     let title = match app.current_session() {
         Some(s) => format!("WINDOWS \u{b7} {}", s.name),
         None => "WINDOWS".to_string(),
     };
     let b = block(title, theme);
-    let inner_width = b.inner(area).width;
+    let inner = b.inner(area);
 
     let dragged_window = match &app.mode {
         Mode::Dragging(drag) => match &drag.item {
@@ -98,39 +202,88 @@ fn render_windows(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let gap_valid = gap_target.is_some() && cursor_is_valid_drop(app);
 
     let windows = app.windows();
-    let mut items: Vec<ListItem> = Vec::with_capacity(windows.len() + 2);
+    let mut items: Vec<ListItem> = Vec::with_capacity(windows.len() * 2 + 2);
+    let mut specs: Vec<RowSpec> = Vec::with_capacity(windows.len() * 2 + 2);
+    let mut selected_row = None;
+
     for w in windows {
         if let Some((anchor, after)) = &gap_target
             && anchor == &w.id
             && !after
         {
-            items.push(insertion_line(inner_width, theme, gap_valid));
+            items.push(insertion_line(inner.width, theme, gap_valid));
+            specs.push(RowSpec {
+                height: 1,
+                target: ClickTarget::WindowGap {
+                    anchor: anchor.clone(),
+                    after: false,
+                },
+            });
         }
         let picked_up = dragged_window.as_ref() == Some(&w.id);
-        items.push(window_row(w, app, focused, inner_width, theme, picked_up));
+        let is_hovered = !dragging && hovered.as_ref() == Some(&ClickTarget::Window(w.id.clone()));
+        if app.selected_window.as_ref() == Some(&w.id) {
+            selected_row = Some(specs.len());
+        }
+        items.push(window_row(
+            w,
+            app,
+            focused,
+            inner.width,
+            theme,
+            picked_up,
+            is_hovered,
+        ));
+        specs.push(RowSpec {
+            height: 1,
+            target: ClickTarget::Window(w.id.clone()),
+        });
         if let Some((anchor, after)) = &gap_target
             && anchor == &w.id
             && *after
         {
-            items.push(insertion_line(inner_width, theme, gap_valid));
+            items.push(insertion_line(inner.width, theme, gap_valid));
+            specs.push(RowSpec {
+                height: 1,
+                target: ClickTarget::WindowGap {
+                    anchor: anchor.clone(),
+                    after: true,
+                },
+            });
         }
     }
 
     let on_pseudo = focused && matches!(app.resolve_drop_target(), Some(DropTarget::NewWindowRow));
     let pseudo_valid = on_pseudo && cursor_is_valid_drop(app);
-    items.push(pseudo_row("+ new window", inner_width, theme, pseudo_valid));
+    let pseudo_hovered = !dragging && hovered == Some(ClickTarget::NewWindowRow);
+    items.push(pseudo_row(
+        "+ new window",
+        theme,
+        pseudo_valid,
+        pseudo_hovered,
+    ));
+    specs.push(RowSpec {
+        height: 1,
+        target: ClickTarget::NewWindowRow,
+    });
 
-    frame.render_widget(List::new(items).block(b), area);
+    let offset = layout_column(app, Column::Windows, area, inner, &specs, selected_row);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(selected_row);
+    frame.render_stateful_widget(List::new(items).block(b), area, &mut state);
 }
 
 fn render_panes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let focused = app.focus == Column::Panes;
+    let dragging = matches!(app.mode, Mode::Dragging(_));
+    let hovered = app.hover();
     let title = match app.current_window() {
         Some(w) => format!("PANES \u{b7} {}:{}", w.index, w.name),
         None => "PANES".to_string(),
     };
     let b = block(title, theme);
-    let inner_width = b.inner(area).width;
+    let inner = b.inner(area);
 
     let dragged_pane = match &app.mode {
         Mode::Dragging(drag) => match &drag.item {
@@ -141,25 +294,42 @@ fn render_panes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     };
 
     let home = std::env::var("HOME").ok();
-    let mut items: Vec<ListItem> = app
-        .panes()
-        .iter()
-        .map(|p| {
-            let picked_up = dragged_pane.as_ref() == Some(&p.id);
-            pane_row(
-                p,
-                app,
-                focused,
-                inner_width,
-                theme,
-                home.as_deref(),
-                picked_up,
-            )
-        })
-        .collect();
-    items.push(pseudo_row("+ split pane", inner_width, theme, false));
+    let mut items: Vec<ListItem> = Vec::with_capacity(app.panes().len() + 1);
+    let mut specs: Vec<RowSpec> = Vec::with_capacity(app.panes().len() + 1);
+    let mut selected_row = None;
+    for p in app.panes() {
+        let picked_up = dragged_pane.as_ref() == Some(&p.id);
+        let is_hovered = !dragging && hovered.as_ref() == Some(&ClickTarget::Pane(p.id.clone()));
+        if app.selected_pane.as_ref() == Some(&p.id) {
+            selected_row = Some(specs.len());
+        }
+        items.push(pane_row(
+            p,
+            app,
+            focused,
+            inner.width,
+            theme,
+            home.as_deref(),
+            picked_up,
+            is_hovered,
+        ));
+        specs.push(RowSpec {
+            height: 2,
+            target: ClickTarget::Pane(p.id.clone()),
+        });
+    }
+    let pseudo_hovered = !dragging && hovered == Some(ClickTarget::NewSplitRow);
+    items.push(pseudo_row("+ split pane", theme, false, pseudo_hovered));
+    specs.push(RowSpec {
+        height: 1,
+        target: ClickTarget::NewSplitRow,
+    });
 
-    frame.render_widget(List::new(items).block(b), area);
+    let offset = layout_column(app, Column::Panes, area, inner, &specs, selected_row);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(selected_row);
+    frame.render_stateful_widget(List::new(items).block(b), area, &mut state);
 }
 
 /// The picked-up row's styling while dragging (§6.5): fg blue, italic, meta
@@ -170,12 +340,14 @@ fn picked_up_style(theme: &Theme) -> Style {
         .add_modifier(Modifier::ITALIC)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_row(
     s: &Session,
     app: &App,
     column_focused: bool,
     width: u16,
     theme: &Theme,
+    hovered: bool,
 ) -> ListItem<'static> {
     let selected = app.selected_session.as_ref() == Some(&s.id);
     let dot = if s.attached { "\u{25cf}" } else { "\u{25cb}" };
@@ -200,7 +372,14 @@ fn session_row(
         && column_focused
         && cursor_is_valid_drop(app)
         && matches!(app.resolve_drop_target(), Some(DropTarget::SessionRow(id)) if id == s.id);
-    styled_row(vec![line], selected, column_focused, drop_valid, theme)
+    styled_row(
+        vec![line],
+        selected,
+        column_focused,
+        drop_valid,
+        hovered,
+        theme,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -211,6 +390,7 @@ fn window_row(
     width: u16,
     theme: &Theme,
     picked_up: bool,
+    hovered: bool,
 ) -> ListItem<'static> {
     let selected = app.selected_window.as_ref() == Some(&w.id);
     let name_style = if picked_up {
@@ -255,6 +435,7 @@ fn window_row(
         selected && !picked_up,
         column_focused,
         drop_valid,
+        hovered,
         theme,
     )
 }
@@ -268,6 +449,7 @@ fn pane_row(
     theme: &Theme,
     home: Option<&str>,
     picked_up: bool,
+    hovered: bool,
 ) -> ListItem<'static> {
     let selected = app.selected_pane.as_ref() == Some(&p.id);
     let dot = if p.active { "\u{25cf}" } else { "\u{25cb}" };
@@ -315,20 +497,22 @@ fn pane_row(
         selected && !picked_up,
         column_focused,
         drop_valid,
+        hovered,
         theme,
     )
 }
 
-fn pseudo_row(label: &str, width: u16, theme: &Theme, drop_valid: bool) -> ListItem<'static> {
+fn pseudo_row(label: &str, theme: &Theme, drop_valid: bool, hovered: bool) -> ListItem<'static> {
     let style = if drop_valid {
         Style::default().fg(theme.accent())
     } else {
         Style::default().fg(theme.overlay0)
     };
     let line = Line::from(Span::styled(label.to_string(), style));
-    let _ = width;
     let bg = if drop_valid {
         theme.surface1
+    } else if hovered {
+        theme.mantle
     } else {
         theme.bg()
     };
@@ -355,19 +539,24 @@ fn insertion_line(width: u16, theme: &Theme, valid: bool) -> ListItem<'static> {
 /// focused column's selected row, two spaces otherwise — keeps multi-line rows
 /// (panes) aligned since every line gets the same prefix width. `drop_valid`
 /// overrides the background/gutter color to the drag accent (blue) instead of
-/// the normal selection color.
+/// the normal selection color; `hovered` (idle mouse hover only, never set
+/// while dragging) gets a quiet `mantle` bg one notch above the plain bg,
+/// reusing the same dim color already used for unfocused-column selection
+/// rather than introducing a new one (§8.3: exact palette only).
+#[allow(clippy::too_many_arguments)]
 fn styled_row(
     mut lines: Vec<Line<'static>>,
     selected: bool,
     column_focused: bool,
     drop_valid: bool,
+    hovered: bool,
     theme: &Theme,
 ) -> ListItem<'static> {
     let bg = if drop_valid {
         theme.surface1
     } else if selected && column_focused {
         theme.selection_bg()
-    } else if selected {
+    } else if selected || hovered {
         theme.mantle
     } else {
         theme.bg()
@@ -453,5 +642,33 @@ mod tests {
         );
         let total: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
         assert_eq!(total, 18); // width(20) - 2-col gutter reserved by styled_row
+    }
+
+    #[test]
+    fn clamp_scroll_snaps_down_when_selection_is_above_the_offset() {
+        let heights = vec![1u16; 10];
+        assert_eq!(clamp_scroll(5, Some(2), &heights, 4), 2);
+    }
+
+    #[test]
+    fn clamp_scroll_advances_when_selection_is_below_the_visible_window() {
+        let heights = vec![1u16; 10];
+        // offset 0, height 4 -> rows 0..4 visible; selecting row 7 must scroll.
+        assert_eq!(clamp_scroll(0, Some(7), &heights, 4), 4);
+    }
+
+    #[test]
+    fn clamp_scroll_accounts_for_two_row_pane_heights() {
+        // Three 2-row panes + a 1-row pseudo row; visible_height 5 fits rows
+        // 0 and 1 (4 rows) plus one more row of row 2 — not enough for row 2
+        // to be *fully* visible, so selecting it should push offset forward.
+        let heights = vec![2, 2, 2, 1];
+        assert_eq!(clamp_scroll(0, Some(2), &heights, 5), 1);
+    }
+
+    #[test]
+    fn clamp_scroll_stays_put_when_nothing_selected() {
+        let heights = vec![1u16; 3];
+        assert_eq!(clamp_scroll(1, None, &heights, 2), 1);
     }
 }

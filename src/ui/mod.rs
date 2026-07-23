@@ -1,6 +1,7 @@
 pub mod app;
 pub mod columns;
 pub mod drag;
+pub mod hitmap;
 pub mod overlays;
 pub mod statusbar;
 pub mod theme;

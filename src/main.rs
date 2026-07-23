@@ -15,6 +15,11 @@ use tmux_ui_manager::tmux::snapshot::take_snapshot;
 use tmux_ui_manager::ui::{self, app::App, theme::Theme};
 
 const TICK_RATE: Duration = Duration::from_secs(2);
+/// §6.5 auto-scroll cadence: while dragging with the pointer parked on an
+/// overflowing column's top/bottom row, scroll it once per this interval.
+/// Driven by shortening the event loop's poll timeout rather than a separate
+/// timer thread — a timeout with no event *is* the tick.
+const AUTO_SCROLL_RATE: Duration = Duration::from_millis(150);
 
 fn main() {
     if std::env::var_os("TMUX").is_none() {
@@ -70,14 +75,23 @@ fn run(
         }
 
         // Wait up to the tick interval for the first event; a timeout is itself
-        // the periodic-refresh signal (§4.3).
-        if event::poll(TICK_RATE)? {
+        // the periodic-refresh signal (§4.3) — unless a drag has the pointer
+        // parked on an overflowing column's edge, in which case a much
+        // shorter timeout drives the auto-scroll cadence instead.
+        let wait = if app.wants_auto_scroll() {
+            AUTO_SCROLL_RATE
+        } else {
+            TICK_RATE
+        };
+        if event::poll(wait)? {
             handle_event(&mut app, event::read()?);
             // Drain the rest of the batch before drawing again (§7 rule 1) — a
             // flood of mouse-move events must never queue up multiple renders.
             while event::poll(Duration::ZERO)? {
                 handle_event(&mut app, event::read()?);
             }
+        } else if app.wants_auto_scroll() {
+            app.auto_scroll_tick();
         } else {
             app.apply_refresh(take_snapshot()?);
         }
@@ -106,6 +120,11 @@ fn handle_event(app: &mut App, event: Event) {
         AppEvent::DragMoveCursor(delta) => app.drag_move_cursor(delta),
         AppEvent::DragCommit => app.commit_drag(),
         AppEvent::DragCancel => app.cancel_drag(),
+        AppEvent::MouseMoved { x, y } => app.mouse_hover(x, y),
+        AppEvent::MouseDown { x, y } => app.mouse_down(x, y),
+        AppEvent::MouseDragged { x, y } => app.mouse_drag(x, y),
+        AppEvent::MouseUp { x, y } => app.mouse_up(x, y),
+        AppEvent::MouseScroll { x, y, delta } => app.mouse_scroll(x, y, delta),
         AppEvent::Redraw | AppEvent::None => {}
     }
 }

@@ -1,13 +1,15 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::ui::app::Mode;
 
 /// Intent extracted from a raw crossterm event, independent of `App`'s internals.
 /// Mode-dependent: the same physical key means different things while an overlay
 /// is open (e.g. `n` types the letter 'n' into an input field rather than
-/// triggering "new"). Mouse events are threaded through as `AppEvent::None` until
-/// M3 wires them up; mouse capture is enabled from M0 so the panic-hook teardown
-/// has something to undo from day one.
+/// triggering "new"). Mouse events (§6.4) are only meaningful in `Normal` and
+/// `Dragging` mode; overlays ignore them (mouse-clickable confirm buttons are
+/// a `M4` nicety, not in scope here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEvent {
     MoveSelection(i32),
@@ -31,13 +33,38 @@ pub enum AppEvent {
     DragMoveCursor(i32),
     DragCommit,
     DragCancel,
+    MouseMoved { x: u16, y: u16 },
+    MouseDown { x: u16, y: u16 },
+    MouseDragged { x: u16, y: u16 },
+    MouseUp { x: u16, y: u16 },
+    MouseScroll { x: u16, y: u16, delta: i32 },
     None,
 }
 
 pub fn translate(mode: &Mode, event: &Event) -> AppEvent {
     match event {
         Event::Key(key) => translate_key(mode, *key),
+        Event::Mouse(mouse) => translate_mouse(mode, *mouse),
         Event::Resize(_, _) => AppEvent::Redraw,
+        _ => AppEvent::None,
+    }
+}
+
+fn translate_mouse(mode: &Mode, mouse: MouseEvent) -> AppEvent {
+    // Overlays (input/confirm) capture the keyboard exclusively; mouse events
+    // underneath them are ignored rather than falling through to the column
+    // beneath.
+    if matches!(mode, Mode::Input(_) | Mode::Confirm(_)) {
+        return AppEvent::None;
+    }
+    let (x, y) = (mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Moved => AppEvent::MouseMoved { x, y },
+        MouseEventKind::Down(MouseButton::Left) => AppEvent::MouseDown { x, y },
+        MouseEventKind::Drag(MouseButton::Left) => AppEvent::MouseDragged { x, y },
+        MouseEventKind::Up(MouseButton::Left) => AppEvent::MouseUp { x, y },
+        MouseEventKind::ScrollDown => AppEvent::MouseScroll { x, y, delta: 1 },
+        MouseEventKind::ScrollUp => AppEvent::MouseScroll { x, y, delta: -1 },
         _ => AppEvent::None,
     }
 }

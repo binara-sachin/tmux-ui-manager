@@ -1,9 +1,22 @@
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
+
+use ratatui::layout::Rect;
+
 use crate::model::{Session, Snapshot, Window};
 use crate::tmux::actions::{self, ActionError};
 use crate::tmux::ids::{PaneId, SessionId, WindowId};
 use crate::tmux::snapshot::take_snapshot;
 use crate::ui::drag::{DragItem, DropTarget, PlannedAction, plan_drop};
+use crate::ui::hitmap::{self, ClickTarget, HitMap};
 use crate::ui::overlays::{ConfirmKind, ConfirmOverlay, InputKind, InputOverlay, Toast};
+
+/// Cursor moved at least this many cells (Manhattan distance) from the
+/// mouse-down position before a pending press promotes to a drag (§6.5).
+const DRAG_MOVE_THRESHOLD: i32 = 1;
+/// A second click on the same target within this window counts as a
+/// double-click (§6.4: "double-click attaches/jumps").
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Column {
@@ -54,6 +67,49 @@ pub enum Mode {
     Dragging(DragState),
 }
 
+/// Per-column scroll offset (index of the first visible row), persisted
+/// across frames so a manual scroll survives even when the selection doesn't
+/// change (§6.1: "each column scrolls independently").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScrollOffsets {
+    pub sessions: usize,
+    pub windows: usize,
+    pub panes: usize,
+}
+
+/// A window/pane row mouse-down that hasn't yet resolved into a click or a
+/// drag (§6.5's `PressPending`).
+#[derive(Debug, Clone)]
+struct PressPending {
+    target: ClickTarget,
+    start: (u16, u16),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AutoScroll {
+    column: Column,
+    direction: i32,
+}
+
+/// Everything mouse-related that must survive across frames: the hit-map and
+/// column rects (rebuilt by `ui::columns` every render, since that's where
+/// row layout is computed), plus interaction state (hover, a pending press,
+/// double-click tracking, scroll offsets, auto-scroll). Wrapped in a
+/// `RefCell` because `ui::columns::render_columns` only ever sees `&App` —
+/// render is read-only everywhere else, but registering this frame's hit-map
+/// *during* that same render is the one exception, and it must be readable
+/// again on the next event without threading a `&mut App` through `draw`.
+#[derive(Default)]
+pub struct MouseState {
+    hit_map: HitMap,
+    column_areas: [Rect; 3],
+    hover: Option<ClickTarget>,
+    press_pending: Option<PressPending>,
+    last_click: Option<(ClickTarget, Instant)>,
+    scroll: ScrollOffsets,
+    auto_scroll: Option<AutoScroll>,
+}
+
 pub struct App {
     pub snapshot: Snapshot,
     pub focus: Column,
@@ -63,6 +119,26 @@ pub struct App {
     pub should_quit: bool,
     pub mode: Mode,
     pub toast: Option<Toast>,
+    pub mouse: RefCell<MouseState>,
+}
+
+fn column_slot(column: Column) -> usize {
+    match column {
+        Column::Sessions => 0,
+        Column::Windows => 1,
+        Column::Panes => 2,
+    }
+}
+
+/// Pure double-click test (§6.4), factored out of `App::handle_click` so it's
+/// unit-testable without going through `activate()` (which would shell out to
+/// the real tmux server outside the isolated-socket live tests).
+fn is_double_click(
+    last: Option<&(ClickTarget, Instant)>,
+    target: &ClickTarget,
+    now: Instant,
+) -> bool {
+    last.is_some_and(|(prev, at)| prev == target && now.duration_since(*at) <= DOUBLE_CLICK_WINDOW)
 }
 
 impl App {
@@ -76,6 +152,7 @@ impl App {
             should_quit: false,
             mode: Mode::Normal,
             toast: None,
+            mouse: RefCell::new(MouseState::default()),
         };
         let first_session = app.snapshot.sessions.first().map(|s| s.id.clone());
         app.set_selected_session(first_session);
@@ -276,6 +353,7 @@ impl App {
             self.selected_pane = origin.pane;
         }
         self.mode = Mode::Normal;
+        self.mouse.borrow_mut().auto_scroll = None;
     }
 
     /// ←/→ (and h/l) while dragging: move focus among only the columns the
@@ -531,6 +609,7 @@ impl App {
 
     /// Enter while dragging: commit the currently planned action (§6.5).
     pub fn commit_drag(&mut self) {
+        self.mouse.borrow_mut().auto_scroll = None;
         let action = self.plan_current_drop();
         match action {
             PlannedAction::NoOp => {}
@@ -922,22 +1001,374 @@ impl App {
         self.selected_pane = first_pane;
     }
 
-    fn session_index(&self) -> Option<usize> {
+    pub(crate) fn session_index(&self) -> Option<usize> {
         self.selected_session
             .as_ref()
             .and_then(|id| self.snapshot.sessions.iter().position(|s| &s.id == id))
     }
 
-    fn window_index(&self) -> Option<usize> {
+    pub(crate) fn window_index(&self) -> Option<usize> {
         self.selected_window
             .as_ref()
             .and_then(|id| self.windows().iter().position(|w| &w.id == id))
     }
 
-    fn pane_index(&self) -> Option<usize> {
+    pub(crate) fn pane_index(&self) -> Option<usize> {
         self.selected_pane
             .as_ref()
             .and_then(|id| self.panes().iter().position(|p| &p.id == id))
+    }
+
+    // -- M3: mouse (§6.4/§6.5) ------------------------------------------
+
+    /// Clears and rebuilds the hit-map/column-rects for this frame; called
+    /// once at the top of `ui::columns::render_columns`.
+    pub fn begin_frame_hit_map(&self) {
+        let mut m = self.mouse.borrow_mut();
+        m.hit_map.clear();
+    }
+
+    /// Registers a rendered row's clickable area (§6.4). Called by
+    /// `ui::columns` for every row it draws.
+    pub fn register_hit(&self, rect: Rect, target: ClickTarget) {
+        self.mouse.borrow_mut().hit_map.push((rect, target));
+    }
+
+    /// Registers a column's own outer rect (border included), used to decide
+    /// which column a scroll/hover/auto-scroll point belongs to even when it
+    /// isn't over any specific row.
+    pub fn set_column_area(&self, column: Column, area: Rect) {
+        self.mouse.borrow_mut().column_areas[column_slot(column)] = area;
+    }
+
+    pub fn scroll_offset(&self, column: Column) -> usize {
+        let s = self.mouse.borrow().scroll;
+        match column {
+            Column::Sessions => s.sessions,
+            Column::Windows => s.windows,
+            Column::Panes => s.panes,
+        }
+    }
+
+    /// Called by `ui::columns` after rendering with a `ListState`, to persist
+    /// whatever offset ratatui settled on (manual scroll, or its own
+    /// keep-selected-visible adjustment) for next frame.
+    pub fn set_scroll_offset(&self, column: Column, offset: usize) {
+        let mut m = self.mouse.borrow_mut();
+        match column {
+            Column::Sessions => m.scroll.sessions = offset,
+            Column::Windows => m.scroll.windows = offset,
+            Column::Panes => m.scroll.panes = offset,
+        }
+    }
+
+    /// The row currently under the pointer (idle hover only — while dragging,
+    /// the drag cursor itself is the visual feedback, see `resolve_drop_target`).
+    pub fn hover(&self) -> Option<ClickTarget> {
+        self.mouse.borrow().hover.clone()
+    }
+
+    fn hit_test(&self, x: u16, y: u16) -> Option<ClickTarget> {
+        hitmap::hit_test(&self.mouse.borrow().hit_map, x, y)
+    }
+
+    fn column_under(&self, x: u16, y: u16) -> Option<Column> {
+        let areas = self.mouse.borrow().column_areas;
+        for (i, area) in areas.iter().enumerate() {
+            if hitmap::rect_contains(area, x, y) {
+                return Some(match i {
+                    0 => Column::Sessions,
+                    1 => Column::Windows,
+                    _ => Column::Panes,
+                });
+            }
+        }
+        None
+    }
+
+    /// A column's item count including its trailing pseudo-row, used to clamp
+    /// scroll offsets (§6.1/§6.5's "+ new ..." rows).
+    fn column_len_with_pseudo(&self, column: Column) -> usize {
+        match column {
+            Column::Sessions => self.snapshot.sessions.len() + 1,
+            Column::Windows => self.windows().len() + 1,
+            Column::Panes => self.panes().len() + 1,
+        }
+    }
+
+    /// Mouse moved with no button held (§6.4 hover). While dragging, the
+    /// pointer instead drives the drag cursor — see `mouse_drag`.
+    pub fn mouse_hover(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Dragging(_)) {
+            self.sync_drag_cursor_to_point(x, y);
+            return;
+        }
+        let target = self.hit_test(x, y);
+        self.mouse.borrow_mut().hover = target;
+    }
+
+    /// MouseDown (left button, §6.5): window/pane rows become `PressPending`
+    /// (click vs. drag decided on release/movement); every other row
+    /// (session rows, pseudo-rows) isn't a drag source, so it just clicks.
+    pub fn mouse_down(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Dragging(_)) {
+            return;
+        }
+        let Some(target) = self.hit_test(x, y) else {
+            return;
+        };
+        match &target {
+            ClickTarget::Window(_) | ClickTarget::Pane(_) => {
+                self.mouse.borrow_mut().press_pending = Some(PressPending {
+                    target,
+                    start: (x, y),
+                });
+            }
+            _ => self.handle_click(target),
+        }
+    }
+
+    /// Mouse moved with the button held: promotes a pending press into a drag
+    /// once it clears the movement threshold (§6.5), or — already dragging —
+    /// re-syncs the drag cursor to whatever is now under the pointer.
+    pub fn mouse_drag(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Dragging(_)) {
+            self.sync_drag_cursor_to_point(x, y);
+            return;
+        }
+        let Some(pending) = self.mouse.borrow().press_pending.clone() else {
+            return;
+        };
+        let moved =
+            (x as i32 - pending.start.0 as i32).abs() + (y as i32 - pending.start.1 as i32).abs();
+        if moved < DRAG_MOVE_THRESHOLD {
+            return;
+        }
+        self.mouse.borrow_mut().press_pending = None;
+        match pending.target {
+            ClickTarget::Window(id) => {
+                self.focus = Column::Windows;
+                self.selected_window = Some(id.clone());
+                self.begin_drag(DragItem::Window(id));
+            }
+            ClickTarget::Pane(id) => {
+                self.focus = Column::Panes;
+                self.selected_pane = Some(id.clone());
+                self.begin_drag(DragItem::Pane(id));
+            }
+            _ => return,
+        }
+        self.sync_drag_cursor_to_point(x, y);
+    }
+
+    /// MouseUp (left button): if this was a plain click (no drag threshold
+    /// crossed), dispatch it; if a drag is in progress, commit it — or, since
+    /// a mouse release is a terminal gesture (there's no "stay in move-mode"
+    /// for the mouse the way there is for keyboard's Enter), silently cancel
+    /// when it lands on a no-op (§6.5: "MouseUp on invalid area → Idle").
+    pub fn mouse_up(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Dragging(_)) {
+            self.sync_drag_cursor_to_point(x, y);
+            if matches!(self.plan_current_drop(), PlannedAction::NoOp) {
+                self.cancel_drag();
+            } else {
+                self.commit_drag();
+            }
+            return;
+        }
+        let pending = self.mouse.borrow_mut().press_pending.take();
+        if let Some(pending) = pending {
+            self.handle_click(pending.target);
+        }
+    }
+
+    /// Scroll wheel (§6.4): scrolls whichever column is under the pointer,
+    /// independent of focus.
+    pub fn mouse_scroll(&mut self, x: u16, y: u16, delta: i32) {
+        let Some(column) = self.column_under(x, y) else {
+            return;
+        };
+        let max = self.column_len_with_pseudo(column).saturating_sub(1) as i32;
+        let next = (self.scroll_offset(column) as i32 + delta).clamp(0, max.max(0));
+        self.set_scroll_offset(column, next as usize);
+    }
+
+    /// A completed click — §6.4: select + focus; a pseudo-row triggers its
+    /// create action; a second click on the same target inside the
+    /// double-click window activates it.
+    fn handle_click(&mut self, target: ClickTarget) {
+        let now = Instant::now();
+        let is_double = {
+            let m = self.mouse.borrow();
+            is_double_click(m.last_click.as_ref(), &target, now)
+        };
+        self.mouse.borrow_mut().last_click = Some((target.clone(), now));
+
+        match target {
+            ClickTarget::Session(id) => {
+                self.focus = Column::Sessions;
+                self.set_selected_session(Some(id));
+                if is_double {
+                    self.activate();
+                }
+            }
+            ClickTarget::Window(id) => {
+                self.focus = Column::Windows;
+                self.set_selected_window(Some(id));
+                if is_double {
+                    self.activate();
+                }
+            }
+            ClickTarget::Pane(id) => {
+                self.focus = Column::Panes;
+                self.selected_pane = Some(id);
+                if is_double {
+                    self.activate();
+                }
+            }
+            ClickTarget::NewSessionRow => {
+                self.focus = Column::Sessions;
+                self.open_new();
+            }
+            ClickTarget::NewWindowRow => {
+                self.focus = Column::Windows;
+                self.open_new();
+            }
+            ClickTarget::NewSplitRow => {
+                self.focus = Column::Panes;
+                self.open_new();
+            }
+            ClickTarget::WindowGap { .. } => {}
+        }
+    }
+
+    /// Maps a screen point to the same cursor state keyboard move-mode uses
+    /// (focus, `selected_*`, gap/pseudo-row flags) — mouse and keyboard drags
+    /// share one state machine (§6.5), so this is the only mouse-specific
+    /// logic; everything downstream (`resolve_drop_target`, `plan_current_drop`,
+    /// the footer sentence, `commit_drag`) is untouched.
+    fn sync_drag_cursor_to_point(&mut self, x: u16, y: u16) {
+        if !matches!(self.mode, Mode::Dragging(_)) {
+            return;
+        }
+        let Some(column) = self.column_under(x, y) else {
+            return;
+        };
+        self.drag_sync_focus(column);
+        if let Some(target) = self.hit_test(x, y) {
+            self.drag_set_cursor_for_hit(self.focus, target);
+        }
+        self.update_auto_scroll(column, y);
+    }
+
+    fn drag_sync_focus(&mut self, column: Column) {
+        let Mode::Dragging(drag) = &self.mode else {
+            return;
+        };
+        let allowed: &[Column] = match drag.item {
+            DragItem::Window(_) => &[Column::Sessions, Column::Windows],
+            DragItem::Pane(_) => &[Column::Sessions, Column::Windows, Column::Panes],
+        };
+        if self.focus == column || !allowed.contains(&column) {
+            return;
+        }
+        self.focus = column;
+        self.reset_drag_cursor_for_focus();
+    }
+
+    /// The inverse of `resolve_drop_target`: given a hit-tested row, sets
+    /// whatever cursor sub-state resolves back to it. A window drag hovering
+    /// an ordinary window row (rather than one of the thin insertion-line
+    /// rows) lands on the gap *before* that window — a window-sized target is
+    /// far easier to hit with a mouse than a 1-cell gap line.
+    fn drag_set_cursor_for_hit(&mut self, column: Column, target: ClickTarget) {
+        let Mode::Dragging(drag) = &self.mode else {
+            return;
+        };
+        let item = drag.item.clone();
+        match (&item, column, target) {
+            (_, Column::Sessions, ClickTarget::Session(id)) => {
+                self.selected_session = Some(id);
+                self.set_on_new_session_row(false);
+            }
+            (_, Column::Sessions, ClickTarget::NewSessionRow) => {
+                self.set_on_new_session_row(true);
+            }
+            (DragItem::Window(_), Column::Windows, ClickTarget::Window(id)) => {
+                if let Some(idx) = self.windows().iter().position(|w| w.id == id) {
+                    self.set_gap_index(idx);
+                }
+            }
+            (DragItem::Window(_), Column::Windows, ClickTarget::WindowGap { anchor, after }) => {
+                if let Some(idx) = self.windows().iter().position(|w| w.id == anchor) {
+                    self.set_gap_index(if after { idx + 1 } else { idx });
+                }
+            }
+            (DragItem::Pane(_), Column::Windows, ClickTarget::Window(id)) => {
+                self.selected_window = Some(id);
+                self.set_on_new_window_row(false);
+            }
+            (DragItem::Pane(_), Column::Windows, ClickTarget::NewWindowRow) => {
+                self.set_on_new_window_row(true);
+            }
+            (DragItem::Pane(_), Column::Panes, ClickTarget::Pane(id)) => {
+                self.selected_pane = Some(id);
+            }
+            _ => {}
+        }
+    }
+
+    fn set_on_new_session_row(&mut self, value: bool) {
+        if let Mode::Dragging(drag) = &mut self.mode {
+            drag.on_new_session_row = value;
+        }
+    }
+
+    fn set_on_new_window_row(&mut self, value: bool) {
+        if let Mode::Dragging(drag) = &mut self.mode {
+            drag.on_new_window_row = value;
+        }
+    }
+
+    fn set_gap_index(&mut self, idx: usize) {
+        if let Mode::Dragging(drag) = &mut self.mode {
+            drag.gap_index = Some(idx);
+        }
+    }
+
+    /// Re-evaluates whether the pointer rests on the top/bottom edge of an
+    /// overflowing column while dragging (§6.5 auto-scroll). The actual 150 ms
+    /// cadence lives in `main`'s event loop (a shortened poll timeout), which
+    /// calls `auto_scroll_tick` on every idle interval while this is armed.
+    fn update_auto_scroll(&mut self, column: Column, y: u16) {
+        let area = self.mouse.borrow().column_areas[column_slot(column)];
+        let direction = if area.height <= 2 {
+            None
+        } else if y <= area.y {
+            Some(-1)
+        } else if y >= area.y + area.height.saturating_sub(1) {
+            Some(1)
+        } else {
+            None
+        };
+        self.mouse.borrow_mut().auto_scroll =
+            direction.map(|direction| AutoScroll { column, direction });
+    }
+
+    /// Whether the event loop should shorten its poll timeout to drive
+    /// auto-scroll (see `main::run`).
+    pub fn wants_auto_scroll(&self) -> bool {
+        matches!(self.mode, Mode::Dragging(_)) && self.mouse.borrow().auto_scroll.is_some()
+    }
+
+    /// Advances the armed auto-scroll by one row (§6.5: every 150 ms).
+    pub fn auto_scroll_tick(&mut self) {
+        let Some(AutoScroll { column, direction }) = self.mouse.borrow().auto_scroll else {
+            return;
+        };
+        let max = self.column_len_with_pseudo(column).saturating_sub(1) as i32;
+        let next = (self.scroll_offset(column) as i32 + direction).clamp(0, max.max(0));
+        self.set_scroll_offset(column, next as usize);
     }
 }
 
@@ -1526,5 +1957,214 @@ mod tests {
 
         assert!(matches!(app.mode, Mode::Normal));
         assert!(app.toast.is_none()); // silent cancel, no toast (§10.10)
+    }
+
+    // -- M3: mouse (§6.4/§6.5) -----------------------------------------
+
+    /// Seeds the hit-map the way `ui::columns` would for a one-row-per-item
+    /// sessions column, so mouse tests don't need to actually render.
+    fn seed_session_hits(app: &App) {
+        app.register_hit(
+            Rect::new(0, 0, 20, 1),
+            ClickTarget::Session(SessionId::new("$1")),
+        );
+        app.register_hit(
+            Rect::new(0, 1, 20, 1),
+            ClickTarget::Session(SessionId::new("$2")),
+        );
+        app.register_hit(Rect::new(0, 2, 20, 1), ClickTarget::NewSessionRow);
+        app.set_column_area(Column::Sessions, Rect::new(0, 0, 20, 5));
+    }
+
+    fn seed_window_hits(app: &App) {
+        app.register_hit(
+            Rect::new(20, 0, 20, 1),
+            ClickTarget::Window(WindowId::new("@1")),
+        );
+        app.register_hit(
+            Rect::new(20, 1, 20, 1),
+            ClickTarget::Window(WindowId::new("@2")),
+        );
+        app.register_hit(Rect::new(20, 2, 20, 1), ClickTarget::NewWindowRow);
+        app.set_column_area(Column::Windows, Rect::new(20, 0, 20, 5));
+    }
+
+    #[test]
+    fn double_click_detection_requires_same_target_within_the_window() {
+        let now = Instant::now();
+        assert!(is_double_click(
+            Some(&(ClickTarget::NewSessionRow, now)),
+            &ClickTarget::NewSessionRow,
+            now
+        ));
+        assert!(!is_double_click(
+            Some(&(ClickTarget::NewSessionRow, now)),
+            &ClickTarget::NewWindowRow,
+            now
+        ));
+        let stale = now - Duration::from_millis(500);
+        assert!(!is_double_click(
+            Some(&(ClickTarget::NewSessionRow, stale)),
+            &ClickTarget::NewSessionRow,
+            now
+        ));
+        assert!(!is_double_click(None, &ClickTarget::NewSessionRow, now));
+    }
+
+    #[test]
+    fn mouse_hover_sets_hover_without_touching_selection() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        app.mouse_hover(5, 1);
+        assert_eq!(
+            app.hover(),
+            Some(ClickTarget::Session(SessionId::new("$2")))
+        );
+        assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$1");
+    }
+
+    #[test]
+    fn mouse_click_on_a_row_selects_and_focuses_its_column() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(5, 1);
+        app.mouse_up(5, 1);
+        assert_eq!(app.focus, Column::Sessions);
+        assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$2");
+    }
+
+    #[test]
+    fn mouse_click_on_pseudo_row_opens_the_create_overlay() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        app.mouse_down(5, 2);
+        app.mouse_up(5, 2);
+        assert_eq!(app.focus, Column::Sessions);
+        assert!(matches!(app.mode, Mode::Input(_)));
+    }
+
+    #[test]
+    fn mouse_press_and_release_without_movement_is_a_click_not_a_drag() {
+        let mut app = App::new(sample_snapshot());
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 1); // @2
+        app.mouse_up(25, 1);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@2");
+    }
+
+    #[test]
+    fn mouse_press_then_move_promotes_to_a_drag() {
+        let mut app = App::new(sample_snapshot());
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0); // @1
+        app.mouse_drag(25, 3); // moved several rows -> crosses the threshold
+        match &app.mode {
+            Mode::Dragging(drag) => assert_eq!(drag.item, DragItem::Window(WindowId::new("@1"))),
+            _ => panic!("expected Mode::Dragging"),
+        }
+    }
+
+    #[test]
+    fn dragging_via_mouse_syncs_cursor_to_the_hovered_row() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0); // pick up @1
+        app.mouse_drag(5, 1); // drag over the sessions column, row for $2
+        assert_eq!(app.focus, Column::Sessions);
+        assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$2");
+        assert_eq!(
+            app.resolve_drop_target(),
+            Some(DropTarget::SessionRow(SessionId::new("$2")))
+        );
+    }
+
+    #[test]
+    fn mouse_up_on_a_valid_target_commits_the_drag() {
+        // Lands on "+ new session" specifically (not another session's row):
+        // that `PlannedAction` opens the prefilled input overlay rather than
+        // shelling out immediately, so this test never touches the real tmux
+        // server the way landing on an actual session row's `move-window`
+        // would (this is a plain unit test, not one of the isolated-socket
+        // live tests in `tests/live_actions.rs`).
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0); // pick up @1
+        app.mouse_drag(5, 2); // hover "+ new session"
+        app.mouse_up(5, 2);
+        match &app.mode {
+            Mode::Input(overlay) => assert_eq!(
+                overlay.kind,
+                InputKind::NewSessionFromDrag(DragItem::Window(WindowId::new("@1")))
+            ),
+            _ => panic!("expected Mode::Input"),
+        }
+    }
+
+    #[test]
+    fn mouse_up_on_a_noop_target_silently_cancels() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0); // pick up @1 (lives in $1)
+        app.mouse_drag(5, 0); // hover $1's own row -> no-op target
+        app.mouse_up(5, 0);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.toast.is_none());
+        // Unlike keyboard Enter-on-noop (which stays in move-mode), a mouse
+        // release is terminal — selection should be back to normal browsing,
+        // not left mid-drag.
+        assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@1");
+    }
+
+    #[test]
+    fn mouse_scroll_adjusts_the_hovered_columns_offset_only() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        seed_window_hits(&app);
+        app.mouse_scroll(5, 1, 1); // over the sessions column
+        assert_eq!(app.scroll_offset(Column::Sessions), 1);
+        assert_eq!(app.scroll_offset(Column::Windows), 0);
+    }
+
+    #[test]
+    fn mouse_scroll_does_not_go_negative() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        app.mouse_scroll(5, 1, -1);
+        assert_eq!(app.scroll_offset(Column::Sessions), 0);
+    }
+
+    #[test]
+    fn auto_scroll_arms_at_the_bottom_edge_and_advances_on_tick() {
+        let mut app = App::new(sample_snapshot());
+        seed_window_hits(&app);
+        // Column area height 5 -> inner bottom edge is row 4 (area.y=0..5).
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0);
+        app.mouse_drag(25, 4); // parked on the bottom edge
+        assert!(app.wants_auto_scroll());
+        app.auto_scroll_tick();
+        assert_eq!(app.scroll_offset(Column::Windows), 1);
+    }
+
+    #[test]
+    fn auto_scroll_disarms_once_the_pointer_leaves_the_edge() {
+        let mut app = App::new(sample_snapshot());
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0);
+        app.mouse_drag(25, 4);
+        assert!(app.wants_auto_scroll());
+        app.mouse_drag(25, 2); // back to the middle
+        assert!(!app.wants_auto_scroll());
     }
 }
