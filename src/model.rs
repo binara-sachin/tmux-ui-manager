@@ -16,8 +16,6 @@ pub struct Pane {
     pub active: bool,
     pub command: String,
     pub path: String,
-    /// Rename overlay (M1) reads/writes this via `select-pane -T`.
-    #[allow(dead_code)]
     pub title: String,
     pub zoomed: bool,
 }
@@ -48,9 +46,8 @@ pub struct Session {
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub sessions: Vec<Session>,
-    /// Session this popup's client is currently attached to (§4.2); not yet
-    /// consumed in v1 UI beyond the attached-dot, which uses `Session::attached`.
-    #[allow(dead_code)]
+    /// Session this popup's client is currently attached to (§4.2); used to word
+    /// the kill-confirm guard for the attached session distinctly (§5, §10.2).
     pub client_session: Option<SessionId>,
     pub totals: Totals,
 }

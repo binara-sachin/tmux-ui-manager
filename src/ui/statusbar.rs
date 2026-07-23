@@ -4,7 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::ui::app::App;
+use crate::ui::app::{App, Mode};
 use crate::ui::theme::Theme;
 
 /// Header row: title + live totals (§6.1).
@@ -27,10 +27,16 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-/// Footer row: context-sensitive key hints. M0 only wires navigation + attach + quit;
-/// CRUD/move-mode hints are added as those keys become live in later milestones.
-pub fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let hint = "\u{21b5} attach   \u{2191}\u{2193}/jk move   \u{2190}\u{2192}/hl \u{b7} tab focus   g/G top/bottom   q quit";
+/// Footer row: context-sensitive key hints (§6.1) — switches with `app.mode`.
+/// Move-mode/drag hints are added in M2/M3.
+pub fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let hint = match &app.mode {
+        Mode::Normal => {
+            "\u{21b5} attach  n new  r rename  x kill  z zoom   \u{2191}\u{2193}/jk move   \u{2190}\u{2192}/hl \u{b7} tab focus   g/G top/bottom   q quit"
+        }
+        Mode::Input(_) => "\u{21b5} confirm   Esc cancel",
+        Mode::Confirm(_) => "y yes   n/Esc no",
+    };
     let line = Line::from(Span::styled(hint, Style::default().fg(theme.meta())));
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(theme.bg())),

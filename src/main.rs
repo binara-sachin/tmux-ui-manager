@@ -62,6 +62,7 @@ fn run(
     let theme = Theme::default();
 
     loop {
+        app.expire_toast();
         terminal.draw(|f| ui::draw(f, &app, &theme))?;
 
         if app.should_quit {
@@ -84,12 +85,22 @@ fn run(
 }
 
 fn handle_event(app: &mut App, event: Event) {
-    match input::translate(&event) {
+    match input::translate(&app.mode, &event) {
         AppEvent::MoveSelection(delta) => app.move_selection(delta),
         AppEvent::MoveFocus(delta) => app.move_focus(delta),
         AppEvent::JumpEdge { top } => app.jump_to_edge(top),
         AppEvent::Activate => app.activate(),
         AppEvent::Quit => app.should_quit = true,
+        AppEvent::NewContextual => app.open_new(),
+        AppEvent::RenameContextual => app.open_rename(),
+        AppEvent::KillContextual => app.open_kill_confirm(),
+        AppEvent::ZoomContextual => app.toggle_zoom(),
+        AppEvent::InputChar(c) => app.input_char(c),
+        AppEvent::InputBackspace => app.input_backspace(),
+        AppEvent::InputConfirm => app.input_confirm(),
+        AppEvent::InputCancel => app.input_cancel(),
+        AppEvent::ConfirmYes => app.confirm_yes(),
+        AppEvent::ConfirmNo => app.confirm_no(),
         AppEvent::Redraw | AppEvent::None => {}
     }
 }
