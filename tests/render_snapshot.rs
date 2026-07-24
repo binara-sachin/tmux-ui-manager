@@ -71,6 +71,36 @@ fn sample_snapshot() -> Snapshot {
     }
 }
 
+/// A single session with `count` one-pane windows named `win0`, `win1`, ... —
+/// enough to overflow a normal-height Windows column, for scroll/overflow
+/// tests that need real clipping to exercise.
+fn many_windows_snapshot(count: u32) -> Snapshot {
+    let windows: Vec<Window> = (0..count)
+        .map(|i| {
+            window(
+                &format!("@{i}"),
+                i,
+                &format!("win{i}"),
+                vec![pane(&format!("%{i}"), 0, "zsh")],
+            )
+        })
+        .collect();
+    Snapshot {
+        totals: Totals {
+            sessions: 1,
+            windows: count as usize,
+            panes: count as usize,
+        },
+        client_session: None,
+        sessions: vec![Session {
+            id: SessionId::new("$1"),
+            name: "work".to_string(),
+            attached: true,
+            windows,
+        }],
+    }
+}
+
 fn draw_once(app: &App, theme: &Theme) -> Buffer {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("TestBackend terminal");
@@ -141,6 +171,98 @@ fn identical_consecutive_renders_of_unchanged_state_are_pixel_for_pixel_equal() 
     let second = draw_once(&app, &theme);
     assert_eq!(first, second);
     assert!(first.diff(&second).is_empty());
+}
+
+#[test]
+fn wheel_scroll_persists_across_a_redraw_of_unchanged_state() {
+    // Regression test for a bug where the per-frame "keep the selection
+    // visible" logic ran unconditionally, snapping any wheel-set scroll
+    // offset straight back to wherever the (unchanged) selection was on
+    // *every* render — a field-level assertion on the offset can't catch
+    // this; it only shows up once you actually render twice.
+    let mut app = App::new(many_windows_snapshot(30));
+    app.focus = Column::Windows;
+    let theme = Theme::default();
+
+    // First render populates the hit-map/column-rects mouse_scroll needs.
+    // Note: "win0" alone is a bad probe here — it's still the *selected*
+    // window throughout, so its name also appears in the Panes column title
+    // ("PANES · 0:win0") regardless of Windows-column scroll. Match the
+    // Windows column's own row rendering ("0: win0", index-colon-space-name)
+    // instead, which only appears when that row is actually visible.
+    let first = buffer_text(&draw_once(&app, &theme));
+    assert!(first.contains("0: win0"));
+
+    // Scroll the (unfocused-by-mouse, but that's fine — scroll ignores
+    // keyboard focus per §6.4) windows column down, well clear of the
+    // still-selected win0.
+    for _ in 0..8 {
+        app.mouse_scroll(35, 10, 1);
+    }
+
+    let scrolled = buffer_text(&draw_once(&app, &theme));
+    assert!(
+        !scrolled.contains("0: win0"),
+        "expected the wheel scroll to move win0's row out of view"
+    );
+    assert!(
+        scrolled.contains("8: win8"),
+        "expected the wheel scroll to reveal later windows"
+    );
+
+    // The regression: re-rendering with nothing else changed must NOT
+    // snap back to reveal win0 again.
+    let redrawn = buffer_text(&draw_once(&app, &theme));
+    assert_eq!(
+        scrolled, redrawn,
+        "scroll position must survive a redraw with no new input"
+    );
+}
+
+#[test]
+fn keyboard_navigation_still_reveals_the_selection_after_a_wheel_scroll() {
+    // The other half of the same invariant: a *real* navigation must still
+    // pull the view back to the selection, even right after a manual scroll.
+    let mut app = App::new(many_windows_snapshot(30));
+    app.focus = Column::Windows;
+    let theme = Theme::default();
+    let _ = draw_once(&app, &theme);
+
+    for _ in 0..8 {
+        app.mouse_scroll(35, 10, 1);
+    }
+    let scrolled = buffer_text(&draw_once(&app, &theme));
+    assert!(!scrolled.contains("0: win0"));
+
+    app.jump_to_edge(false); // jump to the last window — a genuine selection change
+    let revealed = buffer_text(&draw_once(&app, &theme));
+    assert!(
+        revealed.contains("29: win29"),
+        "jumping to the last window must scroll it into view"
+    );
+}
+
+#[test]
+fn overflow_indicator_appears_only_while_the_column_is_actually_clipped() {
+    let mut app = App::new(many_windows_snapshot(30));
+    app.focus = Column::Windows;
+    let theme = Theme::default();
+
+    let idle = buffer_text(&draw_once(&app, &theme));
+    assert!(
+        idle.contains('\u{2026}'),
+        "30 windows in a normal-height popup should overflow and show the … indicator"
+    );
+
+    // Scroll all the way to the bottom: nothing left below, indicator gone.
+    for _ in 0..40 {
+        app.mouse_scroll(35, 10, 1);
+    }
+    let bottomed_out = buffer_text(&draw_once(&app, &theme));
+    assert!(
+        !bottomed_out.contains('\u{2026}'),
+        "once the last row is visible there is nothing left to indicate"
+    );
 }
 
 #[test]

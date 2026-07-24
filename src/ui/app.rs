@@ -108,6 +108,16 @@ pub struct MouseState {
     last_click: Option<(ClickTarget, Instant)>,
     scroll: ScrollOffsets,
     auto_scroll: Option<AutoScroll>,
+    /// What `selected_session`/`selected_window`/`selected_pane` were as of
+    /// the last render, so `ui::columns` can tell "the user just navigated to
+    /// a new row" (reveal it, scrolling if needed) apart from "the offset
+    /// changed some other way" (a wheel scroll, an auto-scroll tick) — the
+    /// latter must be free to move the view *off* the selected row. Without
+    /// this, a scroll offset set by the wheel gets snapped back to reveal the
+    /// (unchanged) selection on the very next frame.
+    last_selected_session: Option<SessionId>,
+    last_selected_window: Option<WindowId>,
+    last_selected_pane: Option<PaneId>,
 }
 
 pub struct App {
@@ -1066,6 +1076,30 @@ impl App {
     /// the drag cursor itself is the visual feedback, see `resolve_drop_target`).
     pub fn hover(&self) -> Option<ClickTarget> {
         self.mouse.borrow().hover.clone()
+    }
+
+    /// True the first time this is called after `selected_session` changes;
+    /// as a side effect, records the current value for next time. Called
+    /// once per render by `ui::columns` (see `MouseState::last_selected_*`).
+    pub fn session_selection_changed(&self) -> bool {
+        let mut m = self.mouse.borrow_mut();
+        let changed = m.last_selected_session != self.selected_session;
+        m.last_selected_session = self.selected_session.clone();
+        changed
+    }
+
+    pub fn window_selection_changed(&self) -> bool {
+        let mut m = self.mouse.borrow_mut();
+        let changed = m.last_selected_window != self.selected_window;
+        m.last_selected_window = self.selected_window.clone();
+        changed
+    }
+
+    pub fn pane_selection_changed(&self) -> bool {
+        let mut m = self.mouse.borrow_mut();
+        let changed = m.last_selected_pane != self.selected_pane;
+        m.last_selected_pane = self.selected_pane.clone();
+        changed
     }
 
     fn hit_test(&self, x: u16, y: u16) -> Option<ClickTarget> {

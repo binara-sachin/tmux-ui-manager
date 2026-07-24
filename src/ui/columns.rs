@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{Pane, Session, Window};
 use crate::ui::app::{App, Column, Mode};
@@ -56,9 +56,20 @@ fn cursor_is_valid_drop(app: &App) -> bool {
     matches!(app.mode, Mode::Dragging(_)) && !matches!(app.plan_current_drop(), PlannedAction::NoOp)
 }
 
-/// Registers this frame's column-area (for scroll/hover hit-testing) and
-/// row hit-map (for click/drop resolution) in one place, so every column
-/// follows the exact same offset math the visible rows were built from.
+/// Registers this frame's column-area (for scroll/hover hit-testing) and row
+/// hit-map (for click/drop resolution), and decides the scroll offset —
+/// returning it plus the `Rect` for the "…" overflow indicator (§6.1) if the
+/// last visible row isn't the column's last item.
+///
+/// `selection_changed` (§6.2/§6.5's cursor, computed once per render by the
+/// caller via `App::*_selection_changed`) is the trigger that decides *how*
+/// the offset is chosen: only a fresh navigation (keyboard move, jump, or a
+/// mouse-driven drag cursor landing on a new row) pulls the view to reveal
+/// the selection. Anything else that moved the offset since last frame — a
+/// wheel scroll, an auto-scroll tick — must be left alone (just bounds-
+/// clamped so it can't run off the end); reveal-on-every-render was the bug
+/// that made wheel scrolling snap straight back (it forced `offset <=
+/// selected` every single frame, regardless of why the offset had changed).
 fn layout_column(
     app: &App,
     column: Column,
@@ -66,18 +77,21 @@ fn layout_column(
     inner: Rect,
     specs: &[RowSpec],
     selected_row: Option<usize>,
-) -> usize {
+    selection_changed: bool,
+) -> (usize, Option<Rect>) {
     app.set_column_area(column, area);
     let heights: Vec<u16> = specs.iter().map(|s| s.height).collect();
-    let offset = clamp_scroll(
-        app.scroll_offset(column),
-        selected_row,
-        &heights,
-        inner.height,
-    );
+    let current = app.scroll_offset(column);
+    let offset = if selection_changed {
+        reveal_selection(current, selected_row, &heights, inner.height)
+    } else {
+        current.min(max_start_offset(&heights, inner.height))
+    };
     app.set_scroll_offset(column, offset);
 
     let mut y = inner.y;
+    let mut last_visible = None;
+    let mut shown = 0usize;
     for spec in specs.iter().skip(offset) {
         if y >= inner.y + inner.height {
             break;
@@ -86,13 +100,39 @@ fn layout_column(
         if visible_height == 0 {
             break;
         }
-        app.register_hit(
-            Rect::new(inner.x, y, inner.width, visible_height),
-            spec.target.clone(),
-        );
+        let rect = Rect::new(inner.x, y, inner.width, visible_height);
+        app.register_hit(rect, spec.target.clone());
+        last_visible = Some(rect);
         y += spec.height;
+        shown += 1;
     }
-    offset
+
+    let overflow_rect = if offset + shown < specs.len() {
+        last_visible.map(|rect| Rect::new(rect.x + rect.width.saturating_sub(1), rect.y, 1, 1))
+    } else {
+        None
+    };
+    (offset, overflow_rect)
+}
+
+/// The largest offset that still keeps the view filled with content (i.e. the
+/// smallest `start` such that rows `start..` sum to at least `visible_height`
+/// — scrolling any further would just show blank space below the last row).
+/// `0` when everything already fits.
+fn max_start_offset(heights: &[u16], visible_height: u16) -> usize {
+    if heights.is_empty() {
+        return 0;
+    }
+    let mut used = 0u16;
+    let mut start = 0;
+    for (i, h) in heights.iter().enumerate().rev() {
+        used = used.saturating_add(*h);
+        start = i;
+        if used >= visible_height {
+            break;
+        }
+    }
+    start
 }
 
 /// Picks the smallest `offset` such that `selected` (if any) is fully within
@@ -100,7 +140,7 @@ fn layout_column(
 /// Snaps down instantly if selection moved above the current offset (e.g. a
 /// keyboard jump-to-top), then walks forward one row at a time if it's below
 /// the visible window — the list is tiny, so this never loops meaningfully.
-fn clamp_scroll(
+fn reveal_selection(
     offset: usize,
     selected: Option<usize>,
     heights: &[u16],
@@ -126,6 +166,35 @@ fn clamp_scroll(
         offset += 1;
     }
     offset
+}
+
+/// What to pass as `ListState`'s `selected` field for rendering. This is
+/// *not* about highlighting — every row's selection styling is painted
+/// directly into its `ListItem` by `styled_row`, independent of `ListState`.
+/// It exists purely to gate ratatui's own built-in "keep the selected item
+/// visible" behavior (`List`'s `get_items_bounds`, which force-overrides
+/// `state.offset` whenever `selected` is `Some` and out of the given view —
+/// see the ratatui source). We already computed the authoritative offset in
+/// `layout_column` (via `reveal_selection` or a plain bounds-clamp); passing
+/// `selected` through unconditionally would let ratatui silently re-run its
+/// own reveal logic on top of ours every frame, snapping a wheel-scrolled
+/// view straight back to the unchanged selection. So: pass it only on the
+/// frame that actually asked for a reveal.
+fn list_selected(selected_row: Option<usize>, selection_changed: bool) -> Option<usize> {
+    if selection_changed {
+        selected_row
+    } else {
+        None
+    }
+}
+
+fn render_overflow_indicator(frame: &mut Frame, rect: Option<Rect>, theme: &Theme) {
+    if let Some(rect) = rect {
+        frame.render_widget(
+            Paragraph::new(Span::styled("\u{2026}", Style::default().fg(theme.meta()))),
+            rect,
+        );
+    }
 }
 
 fn render_sessions(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -166,11 +235,21 @@ fn render_sessions(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         target: ClickTarget::NewSessionRow,
     });
 
-    let offset = layout_column(app, Column::Sessions, area, inner, &specs, selected_row);
+    let selection_changed = app.session_selection_changed();
+    let (offset, overflow) = layout_column(
+        app,
+        Column::Sessions,
+        area,
+        inner,
+        &specs,
+        selected_row,
+        selection_changed,
+    );
     let mut state = ListState::default()
         .with_offset(offset)
-        .with_selected(selected_row);
+        .with_selected(list_selected(selected_row, selection_changed));
     frame.render_stateful_widget(List::new(items).block(b), area, &mut state);
+    render_overflow_indicator(frame, overflow, theme);
 }
 
 fn render_windows(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -267,11 +346,21 @@ fn render_windows(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         target: ClickTarget::NewWindowRow,
     });
 
-    let offset = layout_column(app, Column::Windows, area, inner, &specs, selected_row);
+    let selection_changed = app.window_selection_changed();
+    let (offset, overflow) = layout_column(
+        app,
+        Column::Windows,
+        area,
+        inner,
+        &specs,
+        selected_row,
+        selection_changed,
+    );
     let mut state = ListState::default()
         .with_offset(offset)
-        .with_selected(selected_row);
+        .with_selected(list_selected(selected_row, selection_changed));
     frame.render_stateful_widget(List::new(items).block(b), area, &mut state);
+    render_overflow_indicator(frame, overflow, theme);
 }
 
 fn render_panes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -325,11 +414,21 @@ fn render_panes(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         target: ClickTarget::NewSplitRow,
     });
 
-    let offset = layout_column(app, Column::Panes, area, inner, &specs, selected_row);
+    let selection_changed = app.pane_selection_changed();
+    let (offset, overflow) = layout_column(
+        app,
+        Column::Panes,
+        area,
+        inner,
+        &specs,
+        selected_row,
+        selection_changed,
+    );
     let mut state = ListState::default()
         .with_offset(offset)
-        .with_selected(selected_row);
+        .with_selected(list_selected(selected_row, selection_changed));
     frame.render_stateful_widget(List::new(items).block(b), area, &mut state);
+    render_overflow_indicator(frame, overflow, theme);
 }
 
 /// The picked-up row's styling while dragging (§6.5): fg blue, italic, meta
@@ -645,30 +744,44 @@ mod tests {
     }
 
     #[test]
-    fn clamp_scroll_snaps_down_when_selection_is_above_the_offset() {
+    fn reveal_selection_snaps_down_when_selection_is_above_the_offset() {
         let heights = vec![1u16; 10];
-        assert_eq!(clamp_scroll(5, Some(2), &heights, 4), 2);
+        assert_eq!(reveal_selection(5, Some(2), &heights, 4), 2);
     }
 
     #[test]
-    fn clamp_scroll_advances_when_selection_is_below_the_visible_window() {
+    fn reveal_selection_advances_when_selection_is_below_the_visible_window() {
         let heights = vec![1u16; 10];
         // offset 0, height 4 -> rows 0..4 visible; selecting row 7 must scroll.
-        assert_eq!(clamp_scroll(0, Some(7), &heights, 4), 4);
+        assert_eq!(reveal_selection(0, Some(7), &heights, 4), 4);
     }
 
     #[test]
-    fn clamp_scroll_accounts_for_two_row_pane_heights() {
+    fn reveal_selection_accounts_for_two_row_pane_heights() {
         // Three 2-row panes + a 1-row pseudo row; visible_height 5 fits rows
         // 0 and 1 (4 rows) plus one more row of row 2 — not enough for row 2
         // to be *fully* visible, so selecting it should push offset forward.
         let heights = vec![2, 2, 2, 1];
-        assert_eq!(clamp_scroll(0, Some(2), &heights, 5), 1);
+        assert_eq!(reveal_selection(0, Some(2), &heights, 5), 1);
     }
 
     #[test]
-    fn clamp_scroll_stays_put_when_nothing_selected() {
+    fn reveal_selection_stays_put_when_nothing_selected() {
         let heights = vec![1u16; 3];
-        assert_eq!(clamp_scroll(1, None, &heights, 2), 1);
+        assert_eq!(reveal_selection(1, None, &heights, 2), 1);
+    }
+
+    #[test]
+    fn max_start_offset_is_zero_when_everything_fits() {
+        let heights = vec![1u16; 5];
+        assert_eq!(max_start_offset(&heights, 10), 0);
+    }
+
+    #[test]
+    fn max_start_offset_stops_at_the_point_the_last_page_fills_the_view() {
+        // 31 one-row items, a 20-row viewport -> the last 20 rows (11..31)
+        // exactly fill it; scrolling further would just show blank space.
+        let heights = vec![1u16; 31];
+        assert_eq!(max_start_offset(&heights, 20), 11);
     }
 }
