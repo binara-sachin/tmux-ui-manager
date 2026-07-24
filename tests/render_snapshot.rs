@@ -102,7 +102,11 @@ fn many_windows_snapshot(count: u32) -> Snapshot {
 }
 
 fn draw_once(app: &App, theme: &Theme) -> Buffer {
-    let backend = TestBackend::new(80, 24);
+    draw_once_sized(app, theme, 80, 24)
+}
+
+fn draw_once_sized(app: &App, theme: &Theme, width: u16, height: u16) -> Buffer {
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("TestBackend terminal");
     terminal
         .draw(|f| ui::draw(f, app, theme))
@@ -141,6 +145,30 @@ fn idle_render_shows_the_three_columns_and_their_contents() {
     // Footer shows the normal keyboard hints, not a drag sentence.
     assert!(text.contains("attach"));
     assert!(!text.contains("drop:"));
+}
+
+#[test]
+fn too_small_terminal_shows_a_centered_notice_instead_of_a_broken_layout() {
+    // §10.7: below 70x15, render a centered "window too small" notice.
+    let app = App::new(sample_snapshot());
+    let theme = Theme::default();
+
+    let tiny = buffer_text(&draw_once_sized(&app, &theme, 60, 12));
+    assert!(tiny.contains("window too small"));
+    // None of the normal chrome should appear — it's a full replacement, not
+    // an overlay on top of a broken column layout.
+    assert!(!tiny.contains("SESSIONS"));
+    assert!(!tiny.contains("attach"));
+}
+
+#[test]
+fn a_terminal_right_at_the_minimum_size_renders_normally() {
+    let app = App::new(sample_snapshot());
+    let theme = Theme::default();
+
+    let text = buffer_text(&draw_once_sized(&app, &theme, 70, 15));
+    assert!(text.contains("SESSIONS"));
+    assert!(!text.contains("window too small"));
 }
 
 /// Row/column of the first occurrence of `needle` in a `buffer_text` dump.

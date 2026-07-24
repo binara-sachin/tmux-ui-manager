@@ -12,7 +12,11 @@ use ratatui::backend::CrosstermBackend;
 
 use tmux_ui_manager::input::{self, AppEvent};
 use tmux_ui_manager::tmux::snapshot::take_snapshot;
-use tmux_ui_manager::ui::{self, app::App, theme::Theme};
+use tmux_ui_manager::ui::{
+    self,
+    app::App,
+    theme::{self, Theme},
+};
 
 const TICK_RATE: Duration = Duration::from_secs(2);
 /// §6.5 auto-scroll cadence: while dragging with the pointer parked on an
@@ -64,7 +68,8 @@ fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = take_snapshot()?;
     let mut app = App::new(snapshot);
-    let theme = Theme::default();
+    app.set_confirm_kill(confirm_kill_enabled());
+    let theme = load_theme();
 
     loop {
         app.expire_toast();
@@ -127,6 +132,39 @@ fn handle_event(app: &mut App, event: Event) {
         AppEvent::MouseScroll { x, y, delta } => app.mouse_scroll(x, y, delta),
         AppEvent::Redraw | AppEvent::None => {}
     }
+}
+
+/// Reads a global tmux option (`show-option -gqv`); `None` if unset, empty,
+/// or the query itself fails (no server, bad option name — all treated the
+/// same as "use the default").
+fn tmux_show_option(name: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["show-option", "-gqv", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+/// §8.2/§9: starts from the hardcoded Mocha defaults, then applies whichever
+/// `@manager-color-*` options are actually set.
+fn load_theme() -> Theme {
+    let mut theme = Theme::default();
+    for option in theme::COLOR_OPTIONS {
+        if let Some(value) = tmux_show_option(option) {
+            theme.apply_option(option, &value);
+        }
+    }
+    theme
+}
+
+/// `@manager-confirm-kill` (§9, default `on`): only the literal value `off`
+/// disables it — anything else (unset, `on`, a typo) keeps the safe default.
+fn confirm_kill_enabled() -> bool {
+    tmux_show_option("@manager-confirm-kill").as_deref() != Some("off")
 }
 
 fn tmux_version() -> Option<(u32, u32)> {

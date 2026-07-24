@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use tmux_ui_manager::tmux::actions;
 use tmux_ui_manager::tmux::ids::{PaneId, SessionId, WindowId};
 use tmux_ui_manager::tmux::snapshot::take_snapshot;
+use tmux_ui_manager::ui::app::{App, Column, Mode};
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -578,5 +579,60 @@ fn pane_to_new_session_recipe_creates_session_with_the_pane() {
         t1.windows[0].panes.len(),
         1,
         "t1 should have lost the broken-out pane"
+    );
+}
+
+// -- M4: @manager-confirm-kill (§9) -------------------------------------
+
+#[test]
+#[ignore]
+fn confirm_kill_off_kills_immediately_without_opening_the_overlay() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = TestServer::start("confirm-kill-off");
+
+    server.tmux_ok(&["new-window", "-d", "-t", "t1:", "-n", "victim"]);
+    let victim =
+        WindowId::new(server.tmux_ok(&["display-message", "-p", "-t", "t1:1", "#{window_id}"]));
+
+    let mut app = App::new(server.snapshot());
+    app.set_confirm_kill(false);
+    app.focus = Column::Windows;
+    app.selected_window = Some(victim.clone());
+
+    app.open_kill_confirm();
+
+    assert!(
+        matches!(app.mode, Mode::Normal),
+        "confirm-kill disabled should never enter Mode::Confirm"
+    );
+    let snap = server.snapshot();
+    assert!(
+        !snap.sessions[0].windows.iter().any(|w| w.id == victim),
+        "the window should already be gone"
+    );
+}
+
+#[test]
+#[ignore]
+fn confirm_kill_on_still_opens_the_overlay_and_does_not_kill_yet() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = TestServer::start("confirm-kill-on");
+
+    server.tmux_ok(&["new-window", "-d", "-t", "t1:", "-n", "victim"]);
+    let victim =
+        WindowId::new(server.tmux_ok(&["display-message", "-p", "-t", "t1:1", "#{window_id}"]));
+
+    let mut app = App::new(server.snapshot());
+    // confirm_kill defaults to true — left untouched here.
+    app.focus = Column::Windows;
+    app.selected_window = Some(victim.clone());
+
+    app.open_kill_confirm();
+
+    assert!(matches!(app.mode, Mode::Confirm(_)));
+    let snap = server.snapshot();
+    assert!(
+        snap.sessions[0].windows.iter().any(|w| w.id == victim),
+        "nothing should be killed until confirm_yes()"
     );
 }

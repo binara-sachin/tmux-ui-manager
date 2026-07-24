@@ -136,6 +136,9 @@ pub struct App {
     pub mode: Mode,
     pub toast: Option<Toast>,
     pub mouse: RefCell<MouseState>,
+    /// `@manager-confirm-kill` (§9, default `on`): when `false`, kills run
+    /// immediately without the confirm overlay.
+    confirm_kill: bool,
 }
 
 fn column_slot(column: Column) -> usize {
@@ -185,10 +188,16 @@ impl App {
             mode: Mode::Normal,
             toast: None,
             mouse: RefCell::new(MouseState::default()),
+            confirm_kill: true,
         };
         let first_session = app.snapshot.sessions.first().map(|s| s.id.clone());
         app.set_selected_session(first_session);
         app
+    }
+
+    /// Applies `@manager-confirm-kill` (§9), read once at startup.
+    pub fn set_confirm_kill(&mut self, enabled: bool) {
+        self.confirm_kill = enabled;
     }
 
     /// Clears an expired toast; call once per loop iteration before drawing.
@@ -283,6 +292,11 @@ impl App {
         match self.focus {
             Column::Sessions => {
                 if let Some(session) = self.current_session() {
+                    let kind = ConfirmKind::KillSession(session.id.clone());
+                    if !self.confirm_kill {
+                        self.run_kill(kind);
+                        return;
+                    }
                     let is_last = self.snapshot.sessions.len() == 1;
                     let is_attached = self.snapshot.client_session.as_ref() == Some(&session.id);
                     let message = if is_last {
@@ -298,29 +312,48 @@ impl App {
                     } else {
                         format!("kill session '{}'?", session.name)
                     };
-                    self.mode = Mode::Confirm(ConfirmOverlay {
-                        kind: ConfirmKind::KillSession(session.id.clone()),
-                        message,
-                    });
+                    self.mode = Mode::Confirm(ConfirmOverlay { kind, message });
                 }
             }
             Column::Windows => {
                 if let Some(window) = self.current_window() {
+                    let kind = ConfirmKind::KillWindow(window.id.clone());
+                    if !self.confirm_kill {
+                        self.run_kill(kind);
+                        return;
+                    }
                     self.mode = Mode::Confirm(ConfirmOverlay {
-                        kind: ConfirmKind::KillWindow(window.id.clone()),
+                        kind,
                         message: format!("kill window '{}'?", window.name),
                     });
                 }
             }
             Column::Panes => {
                 if let Some(pane) = self.selected_pane_ref() {
+                    let kind = ConfirmKind::KillPane(pane.id.clone());
+                    if !self.confirm_kill {
+                        self.run_kill(kind);
+                        return;
+                    }
                     self.mode = Mode::Confirm(ConfirmOverlay {
-                        kind: ConfirmKind::KillPane(pane.id.clone()),
+                        kind,
                         message: format!("kill pane '{}'?", pane.id),
                     });
                 }
             }
         }
+    }
+
+    /// The actual kill mutation, shared by the confirm-overlay's `y` path and
+    /// `@manager-confirm-kill off`'s direct path (§9) so there's exactly one
+    /// place that maps a `ConfirmKind` to a `tmux::actions` call.
+    fn run_kill(&mut self, kind: ConfirmKind) {
+        let result = match kind {
+            ConfirmKind::KillSession(id) => actions::kill_session(&id),
+            ConfirmKind::KillWindow(id) => actions::kill_window(&id),
+            ConfirmKind::KillPane(id) => actions::kill_pane(&id),
+        };
+        self.report(result);
     }
 
     /// `z`: zoom toggle, pane column only (§6.3).
@@ -824,12 +857,7 @@ impl App {
         };
         let kind = overlay.kind.clone();
         self.mode = Mode::Normal;
-        let result = match kind {
-            ConfirmKind::KillSession(id) => actions::kill_session(&id),
-            ConfirmKind::KillWindow(id) => actions::kill_window(&id),
-            ConfirmKind::KillPane(id) => actions::kill_pane(&id),
-        };
-        self.report(result);
+        self.run_kill(kind);
     }
 
     pub fn confirm_no(&mut self) {
