@@ -80,19 +80,20 @@ Colors are literal `#rrggbb` hex only (no named colors) and apply on top of the 
 
 Automated tests (`make test`, `make test-live`) cover the parser, every `tmux::actions` function against an isolated test server, the drag state machine, and render-snapshot regressions. They can't drive a real mouse or eyeball the popup, so this script is the final human check before tagging a release — walk through it once against a real tmux session (ideally on the target setup: macOS/Ghostty/tmux ≥ 3.4).
 
-Run this against a throwaway tmux server, not your daily-driver one — steps below kill sessions/windows/panes for real, and the setup below assumes `main`/`scratch` aren't already names you're using elsewhere:
+Run this against a throwaway tmux server, not your daily-driver one — steps below kill sessions/windows/panes for real. A bare `-f /dev/null` server has no config, so `manager.tmux` needs sourcing explicitly, and its *default* prefix is plain tmux's own (`C-b`), not whatever you've bound in your real `~/.tmux.conf`:
 
 ```sh
 tmux -L manager-acceptance -f /dev/null new-session -d -s main -n editor -c ~
 tmux -L manager-acceptance split-window -d -t main:editor -c ~
 tmux -L manager-acceptance new-window -d -t main: -n logs -c ~
 tmux -L manager-acceptance new-session -d -s scratch -c ~
+tmux -L manager-acceptance run-shell /path/to/tmux-ui-manager/manager.tmux
 tmux -L manager-acceptance attach -t main
 ```
 
-(Then, from inside that session, `prefix + e` as usual — the popup inherits whichever server you're attached to, isolated socket or not.)
+(From inside that session, the popup opens with `C-b e` — not `prefix + e` as bound in your real config, since this is a bare server. If you'd rather test against your actual `~/.tmux.conf` and its real prefix, skip the isolated server and just use a couple of distinctly-named throwaway sessions in your normal tmux instead — either way, verify the *binding* actually fires: a keybinding that silently doesn't fire is exactly the kind of thing worth catching here, not just testing the binary directly.)
 
-1. **Open + layout.** `prefix + e`. Confirm: three columns, Catppuccin Mocha colors, header shows correct session/window/pane counts, footer shows keyboard hints. Resize the terminal below 70×15 — confirm a centered "window too small" notice replaces the layout, then resize back and confirm normal rendering resumes.
+1. **Open + layout.** Press the prefix, then `e` (see above). Confirm: three columns, Catppuccin Mocha colors, header shows correct session/window/pane counts, footer shows keyboard hints. Resize the terminal below 70×15 — confirm a centered "window too small" notice replaces the layout, then resize back and confirm normal rendering resumes.
 2. **Navigate + select, keyboard and mouse.** Use `hjkl`/arrows/Tab to move focus and selection; confirm selecting a session filters its windows, and selecting a window filters its panes (Miller-column cascade). Then click a different session's row with the mouse — same cascade should happen, plus a subtle hover highlight as you move the pointer before clicking.
 3. **Create.** Press `n` on the sessions column → type a name → Enter → new session appears. Press `n` on the windows column → new window appears immediately (no prompt). Press `n` on the panes column → pane splits immediately. Repeat window/session creation once each by clicking the `+ new window` / `+ new session` rows instead of pressing `n`.
 4. **Rename.** Press `r` on a session, window, and pane — each opens a pre-filled input; edit and confirm each. Try renaming a session to an existing name — confirm the inline validation error.
