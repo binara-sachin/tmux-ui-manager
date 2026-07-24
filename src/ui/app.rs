@@ -118,6 +118,12 @@ pub struct MouseState {
     last_selected_session: Option<SessionId>,
     last_selected_window: Option<WindowId>,
     last_selected_pane: Option<PaneId>,
+    /// The confirm overlay's `[y]es`/`[n]o` button rects (§6.6: "mouse-
+    /// clickable buttons"), registered by `ui::overlays::render_confirm_overlay`
+    /// each frame it draws. Kept separate from the columns' `hit_map` — the
+    /// overlay is modal and covers whatever column row was underneath, so its
+    /// clicks must never be resolved against that (now-covered, stale) map.
+    confirm_buttons: Option<(Rect, Rect)>,
 }
 
 pub struct App {
@@ -149,6 +155,22 @@ fn is_double_click(
     now: Instant,
 ) -> bool {
     last.is_some_and(|(prev, at)| prev == target && now.duration_since(*at) <= DOUBLE_CLICK_WINDOW)
+}
+
+/// `Some(true)` = the click landed on `[y]es`, `Some(false)` = `[n]o`, `None`
+/// = neither. Factored out of `App::click_confirm_button` so the coordinate
+/// math is unit-testable without invoking `confirm_yes()` (which — like
+/// `activate()` — shells out to the real tmux server; only `tests/live_actions.rs`,
+/// with its isolated socket, is allowed to exercise that).
+fn resolve_confirm_button(buttons: Option<(Rect, Rect)>, x: u16, y: u16) -> Option<bool> {
+    let (yes_rect, no_rect) = buttons?;
+    if hitmap::rect_contains(&yes_rect, x, y) {
+        Some(true)
+    } else if hitmap::rect_contains(&no_rect, x, y) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 impl App {
@@ -1131,8 +1153,14 @@ impl App {
     }
 
     /// Mouse moved with no button held (§6.4 hover). While dragging, the
-    /// pointer instead drives the drag cursor — see `mouse_drag`.
+    /// pointer instead drives the drag cursor — see `mouse_drag`. The confirm
+    /// overlay doesn't have a hover treatment (§6.6 only asks for clickable
+    /// buttons), and touching the columns' hover state while it's covered by
+    /// the overlay would leave a stale highlight once the overlay closes.
     pub fn mouse_hover(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Confirm(_)) {
+            return;
+        }
         if matches!(self.mode, Mode::Dragging(_)) {
             self.sync_drag_cursor_to_point(x, y);
             return;
@@ -1141,10 +1169,23 @@ impl App {
         self.mouse.borrow_mut().hover = target;
     }
 
+    /// Registers the confirm overlay's button rects for this frame (§6.6),
+    /// called by `ui::overlays::render_confirm_overlay`.
+    pub fn set_confirm_buttons(&self, yes: Rect, no: Rect) {
+        self.mouse.borrow_mut().confirm_buttons = Some((yes, no));
+    }
+
     /// MouseDown (left button, §6.5): window/pane rows become `PressPending`
     /// (click vs. drag decided on release/movement); every other row
     /// (session rows, pseudo-rows) isn't a drag source, so it just clicks.
+    /// While a confirm overlay is open, resolves against its button rects
+    /// instead — a modal overlay's clicks must never fall through to the
+    /// (covered, stale) column hit-map underneath it.
     pub fn mouse_down(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Confirm(_)) {
+            self.click_confirm_button(x, y);
+            return;
+        }
         if matches!(self.mode, Mode::Dragging(_)) {
             return;
         }
@@ -1162,10 +1203,22 @@ impl App {
         }
     }
 
+    fn click_confirm_button(&mut self, x: u16, y: u16) {
+        let buttons = self.mouse.borrow().confirm_buttons;
+        match resolve_confirm_button(buttons, x, y) {
+            Some(true) => self.confirm_yes(),
+            Some(false) => self.confirm_no(),
+            None => {}
+        }
+    }
+
     /// Mouse moved with the button held: promotes a pending press into a drag
     /// once it clears the movement threshold (§6.5), or — already dragging —
     /// re-syncs the drag cursor to whatever is now under the pointer.
     pub fn mouse_drag(&mut self, x: u16, y: u16) {
+        if matches!(self.mode, Mode::Confirm(_)) {
+            return;
+        }
         if matches!(self.mode, Mode::Dragging(_)) {
             self.sync_drag_cursor_to_point(x, y);
             return;
@@ -1219,6 +1272,9 @@ impl App {
     /// Scroll wheel (§6.4): scrolls whichever column is under the pointer,
     /// independent of focus.
     pub fn mouse_scroll(&mut self, x: u16, y: u16, delta: i32) {
+        if matches!(self.mode, Mode::Confirm(_)) {
+            return;
+        }
         let Some(column) = self.column_under(x, y) else {
             return;
         };
@@ -2200,5 +2256,52 @@ mod tests {
         assert!(app.wants_auto_scroll());
         app.mouse_drag(25, 2); // back to the middle
         assert!(!app.wants_auto_scroll());
+    }
+
+    // -- M3: confirm-overlay mouse-clickable buttons (§6.6) -------------
+
+    #[test]
+    fn resolve_confirm_button_maps_coordinates_to_yes_or_no_or_neither() {
+        let buttons = Some((Rect::new(0, 0, 5, 1), Rect::new(7, 0, 4, 1)));
+        assert_eq!(resolve_confirm_button(buttons, 2, 0), Some(true));
+        assert_eq!(resolve_confirm_button(buttons, 8, 0), Some(false));
+        assert_eq!(resolve_confirm_button(buttons, 20, 0), None);
+        assert_eq!(resolve_confirm_button(None, 2, 0), None);
+    }
+
+    #[test]
+    fn clicking_the_no_button_cancels_the_confirm_overlay() {
+        let mut app = App::new(sample_snapshot());
+        app.open_kill_confirm();
+        app.set_confirm_buttons(Rect::new(0, 0, 5, 1), Rect::new(7, 0, 4, 1));
+        app.mouse_down(8, 0); // inside the "no" rect
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn clicking_outside_both_buttons_does_nothing() {
+        let mut app = App::new(sample_snapshot());
+        app.open_kill_confirm();
+        app.set_confirm_buttons(Rect::new(0, 0, 5, 1), Rect::new(7, 0, 4, 1));
+        app.mouse_down(20, 0); // outside both rects
+        assert!(matches!(app.mode, Mode::Confirm(_)));
+    }
+
+    #[test]
+    fn mouse_events_are_inert_over_the_confirm_overlay_except_button_clicks() {
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        app.open_kill_confirm();
+        app.set_confirm_buttons(Rect::new(0, 0, 5, 1), Rect::new(7, 0, 4, 1));
+
+        // Hover/scroll/drag over the (covered) columns underneath must not
+        // touch anything — only the button rects matter while this overlay
+        // is open.
+        app.mouse_hover(5, 0);
+        assert_eq!(app.hover(), None);
+        app.mouse_scroll(5, 0, 1);
+        assert_eq!(app.scroll_offset(Column::Sessions), 0);
+        app.mouse_drag(5, 0);
+        assert!(matches!(app.mode, Mode::Confirm(_)));
     }
 }

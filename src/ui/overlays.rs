@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::tmux::ids::{PaneId, SessionId, WindowId};
+use crate::ui::app::App;
 use crate::ui::drag::DragItem;
 use crate::ui::theme::Theme;
 
@@ -146,11 +147,20 @@ pub fn render_input_overlay(frame: &mut Frame, area: Rect, overlay: &InputOverla
     );
 }
 
+/// `[y]es`/`[n]o` are plain-text spans, not widgets — their clickable rects
+/// (§6.6: "mouse-clickable buttons") are derived by hand here from the exact
+/// same layout used to draw them (first line's leading spans), then handed to
+/// `App` so a click can be resolved without re-deriving this math elsewhere.
+const YES_LABEL: &str = "[y]es";
+const NO_LABEL: &str = "[n]o";
+const BUTTON_GAP: u16 = 2; // the "  " between the two labels
+
 pub fn render_confirm_overlay(
     frame: &mut Frame,
     area: Rect,
     overlay: &ConfirmOverlay,
     theme: &Theme,
+    app: &App,
 ) {
     let rect = centered_rect(50, 4, area);
     frame.render_widget(Clear, rect);
@@ -166,15 +176,24 @@ pub fn render_confirm_overlay(
         Style::default().fg(theme.fg()),
     ));
     let buttons_line = Line::from(vec![
-        Span::styled("[y]es", Style::default().fg(theme.danger())),
-        Span::raw("  "),
-        Span::styled("[n]o", Style::default().fg(theme.meta())),
+        Span::styled(YES_LABEL, Style::default().fg(theme.danger())),
+        Span::raw(" ".repeat(BUTTON_GAP as usize)),
+        Span::styled(NO_LABEL, Style::default().fg(theme.meta())),
     ]);
 
     frame.render_widget(
         Paragraph::new(vec![message_line, buttons_line]).style(Style::default().bg(theme.base)),
         inner,
     );
+
+    if inner.height >= 2 {
+        let buttons_y = inner.y + 1;
+        let yes_len = YES_LABEL.chars().count() as u16;
+        let no_len = NO_LABEL.chars().count() as u16;
+        let yes_rect = Rect::new(inner.x, buttons_y, yes_len, 1);
+        let no_rect = Rect::new(inner.x + yes_len + BUTTON_GAP, buttons_y, no_len, 1);
+        app.set_confirm_buttons(yes_rect, no_rect);
+    }
 }
 
 pub fn render_toast(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {

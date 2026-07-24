@@ -12,7 +12,7 @@ use ratatui::buffer::Buffer;
 
 use tmux_ui_manager::model::{Pane, Session, Snapshot, Totals, Window};
 use tmux_ui_manager::tmux::ids::{PaneId, SessionId, WindowId};
-use tmux_ui_manager::ui::app::{App, Column};
+use tmux_ui_manager::ui::app::{App, Column, Mode};
 use tmux_ui_manager::ui::theme::Theme;
 use tmux_ui_manager::ui::{self};
 
@@ -141,6 +141,39 @@ fn idle_render_shows_the_three_columns_and_their_contents() {
     // Footer shows the normal keyboard hints, not a drag sentence.
     assert!(text.contains("attach"));
     assert!(!text.contains("drop:"));
+}
+
+/// Row/column of the first occurrence of `needle` in a `buffer_text` dump.
+/// `str::find` returns a *byte* offset, but this codebase's rows mix
+/// multi-byte box-drawing characters (`│`, `─`, ...) with ASCII — so the byte
+/// offset has to be converted to a character count (each glyph here is
+/// single-width) to land on the right terminal column.
+fn find_text_position(text: &str, needle: &str) -> Option<(u16, u16)> {
+    for (row, line) in text.lines().enumerate() {
+        if let Some(byte_col) = line.find(needle) {
+            let char_col = line[..byte_col].chars().count();
+            return Some((char_col as u16, row as u16));
+        }
+    }
+    None
+}
+
+#[test]
+fn confirm_overlay_renders_clickable_buttons_and_clicking_no_cancels() {
+    // §6.6: "mouse-clickable buttons". Only exercises the [n]o path — clicking
+    // [y]es would run a real kill-session tmux call, which (like activate())
+    // is reserved for the isolated-socket live tests, not plain unit tests.
+    let mut app = App::new(sample_snapshot());
+    let theme = Theme::default();
+    app.open_kill_confirm();
+
+    let text = buffer_text(&draw_once(&app, &theme));
+    assert!(text.contains("[y]es"));
+    assert!(text.contains("[n]o"));
+
+    let (x, y) = find_text_position(&text, "[n]o").expect("the no button should be rendered");
+    app.mouse_down(x, y);
+    assert!(matches!(app.mode, Mode::Normal));
 }
 
 #[test]

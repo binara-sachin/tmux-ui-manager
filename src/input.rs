@@ -51,10 +51,13 @@ pub fn translate(mode: &Mode, event: &Event) -> AppEvent {
 }
 
 fn translate_mouse(mode: &Mode, mouse: MouseEvent) -> AppEvent {
-    // Overlays (input/confirm) capture the keyboard exclusively; mouse events
-    // underneath them are ignored rather than falling through to the column
-    // beneath.
-    if matches!(mode, Mode::Input(_) | Mode::Confirm(_)) {
+    // The input overlay (new/rename text entry) has no mouse affordances of
+    // its own, so its mouse events are ignored rather than falling through to
+    // the column beneath. The confirm overlay is the exception: §6.6 asks for
+    // clickable [y]es/[n]o buttons, so its clicks flow through the same
+    // MouseDown/MouseUp events — `App` resolves them against the overlay's
+    // own button rects rather than the (covered, stale) column hit-map.
+    if matches!(mode, Mode::Input(_)) {
         return AppEvent::None;
     }
     let (x, y) = (mouse.column, mouse.row);

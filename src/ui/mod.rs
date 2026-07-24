@@ -31,7 +31,9 @@ pub fn draw(frame: &mut Frame, app: &App, theme: &Theme) {
 
     match &app.mode {
         Mode::Input(overlay) => overlays::render_input_overlay(frame, area, overlay, theme),
-        Mode::Confirm(overlay) => overlays::render_confirm_overlay(frame, area, overlay, theme),
+        Mode::Confirm(overlay) => {
+            overlays::render_confirm_overlay(frame, area, overlay, theme, app)
+        }
         // Dragging has no separate overlay — the picked-up row, valid-target
         // highlighting, and insertion line are drawn inline by columns.rs.
         Mode::Normal | Mode::Dragging(_) => {}
