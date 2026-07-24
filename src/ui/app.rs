@@ -1253,8 +1253,18 @@ impl App {
     /// a mouse release is a terminal gesture (there's no "stay in move-mode"
     /// for the mouse the way there is for keyboard's Enter), silently cancel
     /// when it lands on a no-op (§6.5: "MouseUp on invalid area → Idle").
+    /// Releasing outside all three columns (the header/footer rows, or a
+    /// column the dragged item type can't even visit) is *also* "invalid
+    /// area": without this check, the drag cursor is simply left wherever it
+    /// last was (`sync_drag_cursor_to_point` no-ops when the point isn't over
+    /// any column), and that stale, possibly-still-valid target would commit
+    /// instead of the release being treated as "dragged out to abort".
     pub fn mouse_up(&mut self, x: u16, y: u16) {
         if matches!(self.mode, Mode::Dragging(_)) {
+            if self.column_under(x, y).is_none() {
+                self.cancel_drag();
+                return;
+            }
             self.sync_drag_cursor_to_point(x, y);
             if matches!(self.plan_current_drop(), PlannedAction::NoOp) {
                 self.cancel_drag();
@@ -2212,6 +2222,34 @@ mod tests {
         // Unlike keyboard Enter-on-noop (which stays in move-mode), a mouse
         // release is terminal — selection should be back to normal browsing,
         // not left mid-drag.
+        assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@1");
+    }
+
+    #[test]
+    fn mouse_up_outside_all_columns_cancels_instead_of_committing_a_stale_target() {
+        // Regression: releasing over the header/footer row (outside every
+        // registered column area) used to leave the drag cursor exactly
+        // where it last was — since `sync_drag_cursor_to_point` no-ops when
+        // the point isn't over any column — so a perfectly valid, but stale,
+        // target would still commit. §6.5: "MouseUp on invalid area -> Idle
+        // (cancel)"; dragging out past the UI to abort is exactly that case.
+        let mut app = App::new(sample_snapshot());
+        seed_session_hits(&app);
+        seed_window_hits(&app);
+        app.focus = Column::Windows;
+        app.mouse_down(25, 0); // pick up @1 (lives in $1)
+        app.mouse_drag(5, 1); // hover a genuinely valid target: session $2's row
+        assert_eq!(
+            app.resolve_drop_target(),
+            Some(DropTarget::SessionRow(SessionId::new("$2")))
+        );
+
+        // Release far outside every seeded column area (none cover y=50).
+        app.mouse_up(5, 50);
+
+        assert!(matches!(app.mode, Mode::Normal));
+        // Must NOT have committed — back to the pre-drag origin, not $2.
+        assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$1");
         assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@1");
     }
 
