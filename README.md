@@ -4,6 +4,8 @@ An interactive, mouse-capable TUI for managing tmux sessions, windows, and panes
 
 Three linked Miller columns (**SESSIONS → WINDOWS → PANES**), Catppuccin Mocha themed, keyboard- and mouse-driven, opened as a tmux popup.
 
+![demo](demo.gif)
+
 ## Requirements
 
 - tmux ≥ 3.2 (popup styling and a few niceties need ≥ 3.4 — the plugin detects this and adapts automatically)
@@ -111,7 +113,9 @@ If every step matches, tag `v0.1.0`.
 ## Development
 
 ```sh
-make test       # unit + parser + render-snapshot tests
-make test-live   # integration tests against an isolated tmux server (`-L`), never the real one
+make test            # unit + parser + render-snapshot tests
+make test-live        # integration tests against an isolated tmux server (`-L`), never the real one
+make verify-install   # clean-room TPM install + popup smoke test in an isolated $HOME
+make demo             # regenerate the README demo GIF (needs vhs, ttyd, ffmpeg, a Chromium/Chrome binary)
 cargo fmt && cargo clippy --all-targets -- -D warnings
 ```
