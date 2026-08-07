@@ -9,12 +9,13 @@ use crate::tmux::ids::{PaneId, SessionId, WindowId};
 /// character.
 const TEMPLATE_SEP: char = '\u{1f}';
 
-/// tmux's `-F` output always escapes non-printable bytes (confirmed empirically
-/// against tmux 3.4 via a bare `std::process::Command`, no shell involved: a real
-/// tab in a session name comes back as the two chars `\t`, a real backslash comes
-/// back doubled as `\\`). So the `TEMPLATE_SEP` byte we send does NOT survive as a
-/// byte — it comes back as this literal 4-character text instead. Splitting on
-/// this text is safe for any realistic name/path/title: the only way a field
+/// Whether the `TEMPLATE_SEP` byte survives tmux's `-F` output as a raw byte or
+/// gets escaped to the 4-character text `\037` turns out to be a tmux-version
+/// behavior, not a constant: confirmed empirically against tmux 3.4 (via a bare
+/// `std::process::Command`, no shell involved) that it comes back escaped, and
+/// against tmux 3.7b that it comes back as the raw byte unchanged. `split_fields`
+/// below treats either form as a delimiter so both are handled. Splitting on the
+/// escaped text is safe for any realistic name/path/title: the only way a field
 /// value could produce this exact substring is a literal backslash immediately
 /// followed by the literal text `037` (e.g. a session named `foo\037bar`), which
 /// doubles to `foo\\037bar` and happens to contain `\037` — accepted as a
@@ -223,8 +224,37 @@ struct PaneRow {
     window_zoomed: bool,
 }
 
+/// Splits a `list-panes -F` line on `TEMPLATE_SEP`, recognizing it in either
+/// form tmux may have emitted it in (see the comment on `OUTPUT_SEP`): the raw
+/// `\x1f` byte, or the escaped 4-character text `\037`. Operates on bytes so a
+/// split point mid-way through a multibyte UTF-8 name never gets tested — both
+/// delimiter forms are single-byte-led ASCII, so every cut point produced here
+/// falls on a valid `char` boundary.
+fn split_fields(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let escaped = OUTPUT_SEP.as_bytes();
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == TEMPLATE_SEP as u8 {
+            fields.push(&line[start..i]);
+            i += 1;
+            start = i;
+        } else if bytes[i..].starts_with(escaped) {
+            fields.push(&line[start..i]);
+            i += escaped.len();
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    fields.push(&line[start..]);
+    fields
+}
+
 fn parse_pane_line(line: &str, line_number: usize) -> Result<PaneRow, ParseError> {
-    let fields: Vec<&str> = line.split(OUTPUT_SEP).collect();
+    let fields = split_fields(line);
     if fields.len() != FIELD_COUNT {
         return Err(ParseError {
             line_number,

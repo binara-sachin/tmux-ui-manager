@@ -1,14 +1,19 @@
 use tmux_ui_manager::tmux::snapshot::parse_list_panes;
 
-/// Captured via `tmux -L manager-test -f /dev/null list-panes -a -F '...'` (§11.1).
-/// Two sessions: "main" (2 windows: a plain one, and one split into 2 panes with
-/// the first pane zoomed and given an explicit title) and a session named with
-/// spaces and unicode. Hand-authoring this file would defeat the point of the
-/// test: tmux's `-F` output escapes non-printable bytes (our chosen `\x1f`
-/// template separator comes back as the literal text `\037`, not a raw byte —
-/// confirmed empirically, see `src/tmux/snapshot.rs`), so only real tmux output
-/// exercises the actual wire format.
+/// Captured via `tmux -L manager-test -f /dev/null list-panes -a -F '...'` (§11.1),
+/// against a tmux version that escapes the `\x1f` template separator into the
+/// literal 4-character text `\037` (tmux 3.4). Two sessions: "main" (2 windows:
+/// a plain one, and one split into 2 panes with the first pane zoomed and given
+/// an explicit title) and a session named with spaces and unicode. Hand-authoring
+/// this file would defeat the point of the test: only real tmux output exercises
+/// the actual wire format.
 const FIXTURE: &str = include_str!("fixtures/multi_session_zoomed.txt");
+
+/// Same shape as `FIXTURE`, but from a tmux version that passes the `\x1f`
+/// separator through as the raw byte instead of escaping it (confirmed against
+/// tmux 3.6a/3.7b) — the case that crashed the popup on first open before
+/// `split_fields` learned to treat both forms as a valid delimiter.
+const UNESCAPED_FIXTURE: &str = include_str!("fixtures/unescaped_separator.txt");
 
 #[test]
 fn groups_rows_into_sessions_windows_panes_preserving_tmux_order() {
@@ -86,4 +91,26 @@ fn blank_trailing_lines_are_ignored() {
     let with_trailing_newline = format!("{FIXTURE}\n");
     let snapshot = parse_list_panes(&with_trailing_newline, None).expect("should still parse");
     assert_eq!(snapshot.totals.sessions, 2);
+}
+
+#[test]
+fn parses_correctly_when_tmux_does_not_escape_the_separator() {
+    let snapshot = parse_list_panes(UNESCAPED_FIXTURE, None).expect("fixture should parse");
+
+    assert_eq!(snapshot.totals.sessions, 1);
+    assert_eq!(snapshot.totals.windows, 1);
+    assert_eq!(snapshot.totals.panes, 1);
+
+    let session = &snapshot.sessions[0];
+    assert_eq!(session.id.as_target(), "$0");
+    assert_eq!(session.name, "main");
+
+    let window = &session.windows[0];
+    assert_eq!(window.id.as_target(), "@0");
+    assert_eq!(window.name, "editor");
+
+    let pane = &window.panes[0];
+    assert_eq!(pane.id.as_target(), "%0");
+    assert_eq!(pane.command, "bash");
+    assert_eq!(pane.path, "/tmp/project");
 }
