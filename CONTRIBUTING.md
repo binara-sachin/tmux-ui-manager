@@ -27,8 +27,6 @@ Before opening a PR: `cargo fmt`, a clean `cargo clippy --all-targets -- -D warn
 - `src/model.rs` — the in-memory tree (`Session { windows: Vec<Window> }`, etc.) that both the
   snapshot parser and the UI operate on.
 - `src/input.rs` — crossterm event → app-level action mapping (keyboard and mouse).
-- `implementation-docs/IMPLEMENTATION.md` — the design spec this was built against: UI states,
-  the drag-target table (§6.5), edge cases (§10), and what's deliberately deferred to v2 (§12).
 
 ## PR conventions
 
@@ -46,9 +44,11 @@ Before opening a PR: `cargo fmt`, a clean `cargo clippy --all-targets -- -D warn
 
 ## Good first issue: v2 board view
 
-The backend/data model already carries what a board-view renderer needs — `window_layout` is
-captured in the snapshot (`src/tmux/snapshot.rs`) specifically so v2 wouldn't require a backend
-change (see IMPLEMENTATION.md §12). What's missing is purely a new renderer:
+v1 ships a Miller-columns list view only. A second, deferred view — a board layout (sessions as
+columns, windows as cards showing their real pane split, panes as labelled tiles) — was scoped from
+the start but deliberately not built for v1. The backend/data model already carries what it needs —
+`window_layout` is captured in the snapshot (`src/tmux/snapshot.rs`) specifically so v2 wouldn't
+require a backend change. What's missing is purely a new renderer:
 
 - Parse `#{window_layout}`'s checksum + nested `{}`/`[]` geometry string into a tree of splits.
 - Render each window as a fixed-height card showing its real pane split (box-drawing borders,
