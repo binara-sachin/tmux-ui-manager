@@ -17,7 +17,7 @@ Three linked Miller columns (**SESSIONS → WINDOWS → PANES**), Catppuccin Moc
 Add to `~/.tmux.conf`
 
 ```tmux
-set -g @plugin 'Binara-Sachin/tmux-ui-manager'
+set -g @plugin 'binara-sachin/tmux-ui-manager'
 ```
 
 Then `prefix + I` to install. TPM builds the binary automatically on first install (via `scripts/build.sh`); if `cargo` isn't on your `PATH`, tmux will show a message telling you to install Rust first (`brew install rust`, or [rustup.rs](https://rustup.rs)).
@@ -25,7 +25,7 @@ Then `prefix + I` to install. TPM builds the binary automatically on first insta
 ### Manual
 
 ```sh
-git clone Binara-Sachin/tmux-ui-manager ~/.tmux/plugins/tmux-ui-manager
+git clone binara-sachin/tmux-ui-manager ~/.tmux/plugins/tmux-ui-manager
 echo "run-shell ~/.tmux/plugins/tmux-ui-manager/manager.tmux" >> ~/.tmux.conf
 tmux source ~/.tmux.conf
 ```
