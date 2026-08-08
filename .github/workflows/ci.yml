@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: make test
+        run: make test
+      - name: make test-live
+        run: make test-live
+
+  # Only on push to main, not on PRs: this clones the plugin from GitHub
+  # exactly as a real user's TPM would, so it validates the *published*
+  # state (whatever's already on main), not the PR's own changes — running
+  # it on a PR would silently test the wrong code.
+  verify-install:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: make verify-install
+        run: make verify-install
