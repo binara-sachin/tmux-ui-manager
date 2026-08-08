@@ -14,6 +14,15 @@ SOCKET="tmux-ui-manager-verify-$$"
 SCRATCH="$(mktemp -d)"
 trap 'tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true; rm -rf "$SCRATCH"' EXIT
 
+# Overriding $HOME below isolates TPM/plugin state, but a rustup-installed
+# cargo is a shim that looks up its toolchain via $RUSTUP_HOME (and
+# $CARGO_HOME), both of which default from $HOME — so without this, `cargo
+# build` inside the isolated server fails to find any toolchain at all. Only
+# matters for the one command that starts the server (new-session): the
+# server inherits that environment for every later run-shell/pane spawn.
+REAL_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+REAL_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+
 echo "== scratch HOME: $SCRATCH"
 mkdir -p "$SCRATCH/.tmux/plugins"
 
@@ -27,7 +36,8 @@ run '~/.tmux/plugins/tpm/tpm'
 EOF
 
 echo "== starting isolated tmux server ($SOCKET)"
-HOME="$SCRATCH" tmux -L "$SOCKET" -f "$SCRATCH/.tmux.conf" new-session -d -s verify -x 200 -y 50
+HOME="$SCRATCH" RUSTUP_HOME="$REAL_RUSTUP_HOME" CARGO_HOME="$REAL_CARGO_HOME" \
+	tmux -L "$SOCKET" -f "$SCRATCH/.tmux.conf" new-session -d -s verify -x 200 -y 50
 
 echo "== running TPM's install script directly (equivalent of prefix+I)"
 HOME="$SCRATCH" tmux -L "$SOCKET" run-shell "$SCRATCH/.tmux/plugins/tpm/bindings/install_plugins"
@@ -37,13 +47,6 @@ BINARY="$PLUGIN_DIR/target/release/tmux-ui-manager"
 
 if [ ! -x "$BINARY" ]; then
 	echo "FAIL: $BINARY was not built by the install step" >&2
-	echo "-- diagnostic: environment seen by tmux run-shell on this server --" >&2
-	# run-shell's own stdout has nowhere to go without an attached client, so
-	# write to a file instead of relying on it reaching our terminal.
-	DIAG="$SCRATCH/diag.txt"
-	HOME="$SCRATCH" tmux -L "$SOCKET" run-shell "{ echo PATH=\$PATH; echo HOME=\$HOME; command -v cargo || echo 'cargo: not found'; } > '$DIAG' 2>&1"
-	sleep 0.5
-	cat "$DIAG" >&2 2>/dev/null || echo "(diagnostic file was not written)" >&2
 	exit 1
 fi
 echo "== binary built: $BINARY"
