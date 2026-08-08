@@ -12,7 +12,12 @@ set -eu
 
 SOCKET="tmux-ui-manager-verify-$$"
 SCRATCH="$(mktemp -d)"
-trap 'tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true; rm -rf "$SCRATCH"' EXIT
+# Both `|| true`: an EXIT trap's own exit status becomes the script's
+# reported exit status when nothing after it calls `exit` explicitly, so a
+# transient failure in cleanup (e.g. `rm` racing the just-killed server's
+# process teardown still releasing a file in $SCRATCH) must never be allowed
+# to mask a real PASS as a failure.
+trap 'tmux -L "$SOCKET" kill-server >/dev/null 2>&1 || true; rm -rf "$SCRATCH" || true' EXIT
 
 # Overriding $HOME below isolates TPM/plugin state, but a rustup-installed
 # cargo is a shim that looks up its toolchain via $RUSTUP_HOME (and
@@ -58,10 +63,20 @@ if ! HOME="$SCRATCH" tmux -L "$SOCKET" list-keys -T prefix e | grep -q "$PLUGIN_
 fi
 
 echo "== smoke-testing the binary against this tmux version ($(tmux -V))"
-HOME="$SCRATCH" tmux -L "$SOCKET" send-keys -t verify "clear; $BINARY" Enter
+# A fresh window, not the original "verify" one: TPM's install re-sources
+# .tmux.conf twice (before/after installing), which re-runs tpm.sh against
+# that window's session. Immediately following that with send-keys/
+# capture-pane on the *same* window intermittently fails with "no current
+# client" — some part of that reload cycle is still touching it
+# asynchronously. A brand-new window sidesteps whatever that is entirely.
+# (Confirmed real users are unaffected: they always have an attached client
+# by the time they'd press prefix+e, which is the condition that's missing —
+# and racy — here.)
+HOME="$SCRATCH" tmux -L "$SOCKET" new-window -t verify -n smoketest
+HOME="$SCRATCH" tmux -L "$SOCKET" send-keys -t verify:smoketest "clear; $BINARY" Enter
 sleep 1
-OUTPUT="$(HOME="$SCRATCH" tmux -L "$SOCKET" capture-pane -p -t verify)"
-HOME="$SCRATCH" tmux -L "$SOCKET" send-keys -t verify q
+OUTPUT="$(HOME="$SCRATCH" tmux -L "$SOCKET" capture-pane -p -t verify:smoketest)"
+HOME="$SCRATCH" tmux -L "$SOCKET" send-keys -t verify:smoketest q
 
 if echo "$OUTPUT" | grep -q "malformed list-panes output"; then
 	echo "FAIL: binary crashed parsing list-panes output on $(tmux -V)" >&2
