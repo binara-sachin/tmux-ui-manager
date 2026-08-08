@@ -1,5 +1,8 @@
 # tmux-ui-manager
 
+[![CI](https://github.com/binara-sachin/tmux-ui-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/binara-sachin/tmux-ui-manager/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An interactive, mouse-capable TUI for managing tmux sessions, windows, and panes — like `prefix+s` / `prefix+w`, but with full edit capabilities: rearrange, rename, kill, create, and drag-and-drop windows/panes between sessions.
 
 Three linked Miller columns (**SESSIONS → WINDOWS → PANES**), Catppuccin Mocha themed, keyboard- and mouse-driven, opened as a tmux popup.
