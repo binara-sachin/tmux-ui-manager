@@ -38,7 +38,12 @@ BINARY="$PLUGIN_DIR/target/release/tmux-ui-manager"
 if [ ! -x "$BINARY" ]; then
 	echo "FAIL: $BINARY was not built by the install step" >&2
 	echo "-- diagnostic: environment seen by tmux run-shell on this server --" >&2
-	HOME="$SCRATCH" tmux -L "$SOCKET" run-shell 'echo "PATH=$PATH"; echo "HOME=$HOME"; command -v cargo || echo "cargo: not found"' >&2
+	# run-shell's own stdout has nowhere to go without an attached client, so
+	# write to a file instead of relying on it reaching our terminal.
+	DIAG="$SCRATCH/diag.txt"
+	HOME="$SCRATCH" tmux -L "$SOCKET" run-shell "{ echo PATH=\$PATH; echo HOME=\$HOME; command -v cargo || echo 'cargo: not found'; } > '$DIAG' 2>&1"
+	sleep 0.5
+	cat "$DIAG" >&2 2>/dev/null || echo "(diagnostic file was not written)" >&2
 	exit 1
 fi
 echo "== binary built: $BINARY"
