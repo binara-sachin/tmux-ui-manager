@@ -33,30 +33,6 @@ Before opening a PR: `cargo fmt`, a clean `cargo clippy --all-targets -- -D warn
 - One logical change per PR. Match the existing commit style: a short imperative summary (see
   `git log`), body only when the "why" isn't obvious from the diff.
 - Any change to `src/tmux/actions.rs` or `snapshot.rs` needs a live-integration test in
-  `tests/live_actions.rs`, not just a unit test — those are the two modules where real `tmux`
-  version/output quirks live.
+  `tests/live_actions.rs`, not just a unit test.
 - Any change to drag behavior, rendering, or overlays needs a render-snapshot test in
-  `tests/render_snapshot.rs` (ratatui `TestBackend`) — this is the regression net for flicker and
-  layout bugs that unit tests can't see.
-- If you touch anything in the manual acceptance script's territory (README's "Manual acceptance
-  script" section), re-run it against a real tmux session before requesting review — CI can't drive
-  a mouse.
-
-## Good first issue: v2 board view
-
-v1 ships a Miller-columns list view only. A second, deferred view — a board layout (sessions as
-columns, windows as cards showing their real pane split, panes as labelled tiles) — was scoped from
-the start but deliberately not built for v1. The backend/data model already carries what it needs —
-`window_layout` is captured in the snapshot (`src/tmux/snapshot.rs`) specifically so v2 wouldn't
-require a backend change. What's missing is purely a new renderer:
-
-- Parse `#{window_layout}`'s checksum + nested `{}`/`[]` geometry string into a tree of splits.
-- Render each window as a fixed-height card showing its real pane split (box-drawing borders,
-  one label per tile).
-- Toggle between list view and this board view with `v`. Same model, same actions, same drag state
-  machine (`src/ui/drag.rs`) — only the renderer and its hit-map differ (`src/ui/columns.rs` →
-  `src/ui/board.rs`).
-
-This is scoped as additive: it shouldn't require changes to `src/tmux/` or the drag state machine,
-only a new module under `src/ui/`. Good entry point if you want to work on the rendering side
-without needing to understand the tmux-interaction layer first.
+  `tests/render_snapshot.rs` (ratatui `TestBackend`).
