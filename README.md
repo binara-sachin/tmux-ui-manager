@@ -41,6 +41,12 @@ Or, if you already have this checked out locally (no separate clone needed), jus
 run-shell /path/to/tmux-ui-manager/manager.tmux
 ```
 
+`tmux source` builds the binary automatically (via `scripts/build.sh`), the same as the TPM path above — if `cargo` isn't on your `PATH`, tmux will show a message telling you to install Rust first (`brew install rust`, or [rustup.rs](https://rustup.rs)) and reload your config. To build it yourself instead, run this from the plugin directory:
+
+```sh
+cargo build --release
+```
+
 ## Usage
 
 Default binding: `prefix + e` opens the popup. (Chosen so it never clobbers tmux's own `s`/`w` session/window pickers — see Options below if you'd rather bind something else.)
