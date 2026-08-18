@@ -11,7 +11,10 @@ BINARY="$CURRENT_DIR/target/release/tmux-ui-manager"
 # that tmux reports as a cryptic 'run-shell ...' returned 127 message.
 if [ ! -x "$BINARY" ]; then
 	tmux display-message "tmux-ui-manager: binary not built at $BINARY — install Rust (brew install rust, or https://rustup.rs), then run 'cargo build --release' in $CURRENT_DIR and reload tmux config"
-	exit 1
+	# Exit 0, not 1: nothing consumes launch.sh's exit code, but run-shell
+	# reports any nonzero status as its own extra "'<cmd>' returned N"
+	# message — which would otherwise show up right under the message above.
+	exit 0
 fi
 
 WIDTH="${WIDTH:-90%}"
