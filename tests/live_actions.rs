@@ -636,3 +636,33 @@ fn confirm_kill_on_still_opens_the_overlay_and_does_not_kill_yet() {
         "nothing should be killed until confirm_yes()"
     );
 }
+
+#[test]
+#[ignore]
+fn confirm_move_then_enter_kills_via_the_highlighted_yes_button() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let server = TestServer::start("confirm-move-yes");
+
+    server.tmux_ok(&["new-window", "-d", "-t", "t1:", "-n", "victim"]);
+    let victim =
+        WindowId::new(server.tmux_ok(&["display-message", "-p", "-t", "t1:1", "#{window_id}"]));
+
+    let mut app = App::new(server.snapshot());
+    app.focus = Column::Windows;
+    app.selected_window = Some(victim.clone());
+
+    app.open_kill_confirm();
+    assert!(matches!(app.mode, Mode::Confirm(_)));
+
+    // Default highlight is No; moving once flips it to Yes, and Enter should
+    // then activate it exactly as the `y` shortcut does.
+    app.confirm_move();
+    app.confirm_activate();
+
+    assert!(matches!(app.mode, Mode::Normal));
+    let snap = server.snapshot();
+    assert!(
+        !snap.sessions[0].windows.iter().any(|w| w.id == victim),
+        "the window should be gone after activating the highlighted Yes button"
+    );
+}

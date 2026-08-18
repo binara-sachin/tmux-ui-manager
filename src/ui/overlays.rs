@@ -71,10 +71,29 @@ pub enum ConfirmKind {
     KillPane(PaneId),
 }
 
+/// Which button is currently keyboard-highlighted in a [`ConfirmOverlay`].
+/// Defaults to `No`, the safer choice for destructive kill confirmations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfirmButton {
+    Yes,
+    #[default]
+    No,
+}
+
+impl ConfirmButton {
+    pub fn toggle(self) -> Self {
+        match self {
+            ConfirmButton::Yes => ConfirmButton::No,
+            ConfirmButton::No => ConfirmButton::Yes,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfirmOverlay {
     pub kind: ConfirmKind,
     pub message: String,
+    pub selected: ConfirmButton,
 }
 
 #[derive(Debug, Clone)]
@@ -175,10 +194,22 @@ pub fn render_confirm_overlay(
         overlay.message.clone(),
         Style::default().fg(theme.fg()),
     ));
+    let yes_style = Style::default().fg(theme.danger());
+    let no_style = Style::default().fg(theme.meta());
+    let (yes_style, no_style) = match overlay.selected {
+        ConfirmButton::Yes => (
+            yes_style.add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            no_style,
+        ),
+        ConfirmButton::No => (
+            yes_style,
+            no_style.add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ),
+    };
     let buttons_line = Line::from(vec![
-        Span::styled(YES_LABEL, Style::default().fg(theme.danger())),
+        Span::styled(YES_LABEL, yes_style),
         Span::raw(" ".repeat(BUTTON_GAP as usize)),
-        Span::styled(NO_LABEL, Style::default().fg(theme.meta())),
+        Span::styled(NO_LABEL, no_style),
     ]);
 
     frame.render_widget(
