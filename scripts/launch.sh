@@ -4,6 +4,16 @@ set -eu
 CURRENT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BINARY="$CURRENT_DIR/target/release/tmux-ui-manager"
 
+# manager.tmux swallows a failed/skipped build so binding the key never
+# aborts (a later manual `cargo build` + config reload should still work).
+# That means the binary can still be missing here — without this check,
+# `exec ... "$BINARY"` fails with a bare "command not found" (exit 127)
+# that tmux reports as a cryptic 'run-shell ...' returned 127 message.
+if [ ! -x "$BINARY" ]; then
+	tmux display-message "tmux-ui-manager: binary not built at $BINARY — install Rust (brew install rust, or https://rustup.rs), then run 'cargo build --release' in $CURRENT_DIR and reload tmux config"
+	exit 1
+fi
+
 WIDTH="${WIDTH:-90%}"
 HEIGHT="${HEIGHT:-85%}"
 
