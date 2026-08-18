@@ -39,7 +39,9 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 .to_string()
         }
         Mode::Input(_) => "\u{21b5} confirm   Esc cancel".to_string(),
-        Mode::Confirm(_) => "y yes   n/Esc no".to_string(),
+        Mode::Confirm(_) => {
+            "\u{2190}\u{2192}/hl/tab move   \u{21b5} activate   y yes   n/Esc no".to_string()
+        }
         Mode::Dragging(_) => {
             let action = app.plan_current_drop();
             match app.describe_planned_action(&action) {

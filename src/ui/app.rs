@@ -9,7 +9,9 @@ use crate::tmux::ids::{PaneId, SessionId, WindowId};
 use crate::tmux::snapshot::take_snapshot;
 use crate::ui::drag::{DragItem, DropTarget, PlannedAction, plan_drop};
 use crate::ui::hitmap::{self, ClickTarget, HitMap};
-use crate::ui::overlays::{ConfirmKind, ConfirmOverlay, InputKind, InputOverlay, Toast};
+use crate::ui::overlays::{
+    ConfirmButton, ConfirmKind, ConfirmOverlay, InputKind, InputOverlay, Toast,
+};
 
 /// Cursor moved at least this many cells (Manhattan distance) from the
 /// mouse-down position before a pending press promotes to a drag (§6.5).
@@ -312,7 +314,11 @@ impl App {
                     } else {
                         format!("kill session '{}'?", session.name)
                     };
-                    self.mode = Mode::Confirm(ConfirmOverlay { kind, message });
+                    self.mode = Mode::Confirm(ConfirmOverlay {
+                        kind,
+                        message,
+                        selected: ConfirmButton::default(),
+                    });
                 }
             }
             Column::Windows => {
@@ -325,6 +331,7 @@ impl App {
                     self.mode = Mode::Confirm(ConfirmOverlay {
                         kind,
                         message: format!("kill window '{}'?", window.name),
+                        selected: ConfirmButton::default(),
                     });
                 }
             }
@@ -338,6 +345,7 @@ impl App {
                     self.mode = Mode::Confirm(ConfirmOverlay {
                         kind,
                         message: format!("kill pane '{}'?", pane.id),
+                        selected: ConfirmButton::default(),
                     });
                 }
             }
@@ -862,6 +870,26 @@ impl App {
 
     pub fn confirm_no(&mut self) {
         self.mode = Mode::Normal;
+    }
+
+    /// Left/Right/h/l/Tab/Shift-Tab in `Confirm` mode: with only two buttons,
+    /// movement in either direction just flips which one is highlighted.
+    pub fn confirm_move(&mut self) {
+        let Mode::Confirm(overlay) = &mut self.mode else {
+            return;
+        };
+        overlay.selected = overlay.selected.toggle();
+    }
+
+    /// Enter in `Confirm` mode: activates whichever button is highlighted.
+    pub fn confirm_activate(&mut self) {
+        let Mode::Confirm(overlay) = &self.mode else {
+            return;
+        };
+        match overlay.selected {
+            ConfirmButton::Yes => self.confirm_yes(),
+            ConfirmButton::No => self.confirm_no(),
+        }
     }
 
     /// Replaces the model with a fresh snapshot (post-mutation or periodic tick, §4.3)
@@ -1834,6 +1862,51 @@ mod tests {
         let mut app = App::new(sample_snapshot());
         app.open_kill_confirm();
         app.confirm_no();
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn confirm_overlay_defaults_to_no_selected() {
+        let mut app = App::new(sample_snapshot());
+        app.open_kill_confirm();
+        match &app.mode {
+            Mode::Confirm(overlay) => assert_eq!(overlay.selected, ConfirmButton::No),
+            _ => panic!("expected Mode::Confirm"),
+        }
+    }
+
+    #[test]
+    fn confirm_move_toggles_selected_button() {
+        let mut app = App::new(sample_snapshot());
+        app.open_kill_confirm();
+        app.confirm_move();
+        match &app.mode {
+            Mode::Confirm(overlay) => assert_eq!(overlay.selected, ConfirmButton::Yes),
+            _ => panic!("expected Mode::Confirm"),
+        }
+        app.confirm_move();
+        match &app.mode {
+            Mode::Confirm(overlay) => assert_eq!(overlay.selected, ConfirmButton::No),
+            _ => panic!("expected Mode::Confirm"),
+        }
+    }
+
+    // `confirm_activate()` with `Yes` highlighted shells out to the real tmux
+    // server via `confirm_yes()` (see `resolve_confirm_button`'s doc comment
+    // above) — only `tests/live_actions.rs` exercises that path. Here we only
+    // cover the safe `No` path, which is a pure state transition.
+    #[test]
+    fn confirm_activate_with_no_highlighted_returns_to_normal_without_acting() {
+        let mut app = App::new(sample_snapshot());
+        app.open_kill_confirm();
+        assert_eq!(
+            match &app.mode {
+                Mode::Confirm(overlay) => overlay.selected,
+                _ => panic!("expected Mode::Confirm"),
+            },
+            ConfirmButton::No
+        );
+        app.confirm_activate();
         assert!(matches!(app.mode, Mode::Normal));
     }
 

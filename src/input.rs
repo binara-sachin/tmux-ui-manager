@@ -28,6 +28,8 @@ pub enum AppEvent {
     InputCancel,
     ConfirmYes,
     ConfirmNo,
+    ConfirmMove,
+    ConfirmActivate,
     EnterMoveMode,
     DragMoveFocus(i32),
     DragMoveCursor(i32),
@@ -122,6 +124,13 @@ fn translate_confirm_key(key: KeyEvent) -> AppEvent {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => AppEvent::ConfirmYes,
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => AppEvent::ConfirmNo,
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Char('h')
+        | KeyCode::Char('l')
+        | KeyCode::Tab
+        | KeyCode::BackTab => AppEvent::ConfirmMove,
+        KeyCode::Enter => AppEvent::ConfirmActivate,
         _ => AppEvent::None,
     }
 }
@@ -141,7 +150,9 @@ fn translate_dragging_key(key: KeyEvent) -> AppEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::overlays::{ConfirmKind, ConfirmOverlay, InputKind, InputOverlay};
+    use crate::ui::overlays::{
+        ConfirmButton, ConfirmKind, ConfirmOverlay, InputKind, InputOverlay,
+    };
     use crossterm::event::KeyEventState;
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -238,10 +249,11 @@ mod tests {
     }
 
     #[test]
-    fn confirm_mode_only_responds_to_y_n_esc() {
+    fn confirm_mode_responds_to_y_n_esc_and_navigation() {
         let mode = Mode::Confirm(ConfirmOverlay {
             kind: ConfirmKind::KillPane(crate::tmux::ids::PaneId::new("%1")),
             message: String::new(),
+            selected: ConfirmButton::No,
         });
         assert_eq!(
             translate_key(&mode, press(KeyCode::Char('y'))),
@@ -258,6 +270,20 @@ mod tests {
         assert_eq!(
             translate_key(&mode, press(KeyCode::Char('x'))),
             AppEvent::None
+        );
+        for code in [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Tab,
+            KeyCode::BackTab,
+        ] {
+            assert_eq!(translate_key(&mode, press(code)), AppEvent::ConfirmMove);
+        }
+        assert_eq!(
+            translate_key(&mode, press(KeyCode::Enter)),
+            AppEvent::ConfirmActivate
         );
     }
 }

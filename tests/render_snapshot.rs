@@ -9,6 +9,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::style::Modifier;
 
 use tmux_ui_manager::model::{Pane, Session, Snapshot, Totals, Window};
 use tmux_ui_manager::tmux::ids::{PaneId, SessionId, WindowId};
@@ -202,6 +203,54 @@ fn confirm_overlay_renders_clickable_buttons_and_clicking_no_cancels() {
     let (x, y) = find_text_position(&text, "[n]o").expect("the no button should be rendered");
     app.mouse_down(x, y);
     assert!(matches!(app.mode, Mode::Normal));
+}
+
+#[test]
+fn confirm_overlay_highlights_the_keyboard_selected_button() {
+    // The issue's core ask: the highlighted button must be visually distinct
+    // (reverse/bold) from the other, and must move with `confirm_move` — a
+    // text-only assertion (as in the test above) can't see this at all.
+    let mut app = App::new(sample_snapshot());
+    let theme = Theme::default();
+    app.open_kill_confirm();
+
+    let buffer = draw_once(&app, &theme);
+    let text = buffer_text(&buffer);
+    let (yes_x, yes_y) = find_text_position(&text, "[y]es").expect("yes button rendered");
+    let (no_x, no_y) = find_text_position(&text, "[n]o").expect("no button rendered");
+
+    // Default highlight is No.
+    assert!(
+        !buffer
+            .cell((yes_x, yes_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert!(
+        buffer
+            .cell((no_x, no_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+
+    app.confirm_move(); // flip highlight to Yes
+    let buffer = draw_once(&app, &theme);
+    assert!(
+        buffer
+            .cell((yes_x, yes_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert!(
+        !buffer
+            .cell((no_x, no_y))
+            .unwrap()
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
 }
 
 #[test]
