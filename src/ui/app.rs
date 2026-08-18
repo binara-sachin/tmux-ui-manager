@@ -192,8 +192,29 @@ impl App {
             mouse: RefCell::new(MouseState::default()),
             confirm_kill: true,
         };
-        let first_session = app.snapshot.sessions.first().map(|s| s.id.clone());
-        app.set_selected_session(first_session);
+        let current_session = app
+            .snapshot
+            .client_session
+            .as_ref()
+            .filter(|id| app.snapshot.session(id).is_some())
+            .cloned()
+            .or_else(|| app.snapshot.sessions.first().map(|s| s.id.clone()));
+        app.set_selected_session(current_session);
+
+        // set_selected_session/set_selected_window (used above, and elsewhere for
+        // ordinary navigation) cascade to each list's first entry, which is the
+        // right default when the user is just moving the cursor around. On
+        // startup, land on the window/pane the client was actually viewing.
+        if let Some(session) = app.current_session()
+            && let Some(window) = session.windows.iter().find(|w| w.active)
+        {
+            let window_id = window.id.clone();
+            let active_pane = window.panes.iter().find(|p| p.active).map(|p| p.id.clone());
+            app.set_selected_window(Some(window_id));
+            if let Some(pane_id) = active_pane {
+                app.selected_pane = Some(pane_id);
+            }
+        }
         app
     }
 
@@ -1670,6 +1691,44 @@ mod tests {
     #[test]
     fn new_app_selects_first_session_window_pane() {
         let app = App::new(sample_snapshot());
+        assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$1");
+        assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@1");
+        assert_eq!(app.selected_pane.as_ref().unwrap().as_target(), "%1");
+    }
+
+    #[test]
+    fn new_app_selects_the_client_sessions_active_window() {
+        let mut snapshot = sample_snapshot();
+        snapshot.client_session = Some(SessionId::new("$1"));
+        // Client is actually on @2, not @1 (the first window in the list).
+        snapshot.sessions[0].windows[0].active = false;
+        snapshot.sessions[0].windows[1].active = true;
+
+        let app = App::new(snapshot);
+        assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$1");
+        assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@2");
+        assert_eq!(app.selected_pane.as_ref().unwrap().as_target(), "%3");
+    }
+
+    #[test]
+    fn new_app_selects_the_active_pane_within_the_current_window() {
+        let mut snapshot = sample_snapshot();
+        snapshot.client_session = Some(SessionId::new("$1"));
+        // @1 has two panes; client is actually on %2, not %1 (the first).
+        snapshot.sessions[0].windows[0].panes[0].active = false;
+        snapshot.sessions[0].windows[0].panes[1].active = true;
+
+        let app = App::new(snapshot);
+        assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@1");
+        assert_eq!(app.selected_pane.as_ref().unwrap().as_target(), "%2");
+    }
+
+    #[test]
+    fn new_app_falls_back_to_first_session_when_client_session_is_unknown() {
+        let mut snapshot = sample_snapshot();
+        snapshot.client_session = Some(SessionId::new("$999"));
+
+        let app = App::new(snapshot);
         assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$1");
         assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@1");
         assert_eq!(app.selected_pane.as_ref().unwrap().as_target(), "%1");
