@@ -24,6 +24,11 @@ pub enum AppEvent {
     ZoomContextual,
     InputChar(char),
     InputBackspace,
+    InputDelete,
+    InputLeft,
+    InputRight,
+    InputHome,
+    InputEnd,
     InputConfirm,
     InputCancel,
     ConfirmYes,
@@ -113,6 +118,11 @@ fn translate_input_key(key: KeyEvent) -> AppEvent {
         KeyCode::Enter => AppEvent::InputConfirm,
         KeyCode::Esc => AppEvent::InputCancel,
         KeyCode::Backspace => AppEvent::InputBackspace,
+        KeyCode::Delete => AppEvent::InputDelete,
+        KeyCode::Left => AppEvent::InputLeft,
+        KeyCode::Right => AppEvent::InputRight,
+        KeyCode::Home => AppEvent::InputHome,
+        KeyCode::End => AppEvent::InputEnd,
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             AppEvent::InputChar(c)
         }

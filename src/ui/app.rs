@@ -833,6 +833,12 @@ impl App {
         }
     }
 
+    pub fn input_cursor(&mut self, f: impl FnOnce(&mut InputOverlay)) {
+        if let Mode::Input(overlay) = &mut self.mode {
+            f(overlay);
+        }
+    }
+
     pub fn input_cancel(&mut self) {
         self.mode = Mode::Normal;
     }

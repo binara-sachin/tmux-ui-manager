@@ -40,26 +40,70 @@ impl InputKind {
 pub struct InputOverlay {
     pub kind: InputKind,
     pub text: String,
+    /// Cursor position as a char index into `text` (0..=char count).
+    pub cursor: usize,
     pub error: Option<String>,
 }
 
 impl InputOverlay {
     pub fn new(kind: InputKind, prefill: impl Into<String>) -> Self {
+        let text: String = prefill.into();
+        let cursor = text.chars().count();
         Self {
             kind,
-            text: prefill.into(),
+            text,
+            cursor,
             error: None,
         }
     }
 
+    fn byte_index(&self, char_idx: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(char_idx)
+            .map_or(self.text.len(), |(i, _)| i)
+    }
+
     pub fn push_char(&mut self, c: char) {
-        self.text.push(c);
+        let at = self.byte_index(self.cursor);
+        self.text.insert(at, c);
+        self.cursor += 1;
         self.error = None;
     }
 
+    /// Deletes the char before the cursor.
     pub fn backspace(&mut self) {
-        self.text.pop();
+        if self.cursor > 0 {
+            let at = self.byte_index(self.cursor - 1);
+            self.text.remove(at);
+            self.cursor -= 1;
+        }
         self.error = None;
+    }
+
+    /// Deletes the char under the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor < self.text.chars().count() {
+            let at = self.byte_index(self.cursor);
+            self.text.remove(at);
+        }
+        self.error = None;
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.text.chars().count());
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.text.chars().count();
     }
 }
 
@@ -164,6 +208,11 @@ pub fn render_input_overlay(frame: &mut Frame, area: Rect, overlay: &InputOverla
         Paragraph::new(vec![input_line, error_line]).style(Style::default().bg(theme.base)),
         inner,
     );
+
+    // Show the terminal's native cursor at the edit position, clamped inside
+    // the box so a long name doesn't push it past the right border.
+    let cursor_x = (inner.x + 2 + overlay.cursor as u16).min(inner.right().saturating_sub(1));
+    frame.set_cursor_position((cursor_x, inner.y));
 }
 
 /// `[y]es`/`[n]o` are plain-text spans, not widgets — their clickable rects
@@ -266,6 +315,31 @@ mod tests {
         overlay.backspace();
         assert_eq!(overlay.text, "");
         assert!(overlay.error.is_none());
+    }
+
+    #[test]
+    fn input_overlay_cursor_editing() {
+        let mut o = InputOverlay::new(InputKind::NewSession, "héllo");
+        assert_eq!(o.cursor, 5);
+        o.move_left();
+        o.move_left();
+        o.push_char('X');
+        assert_eq!(o.text, "hélXlo");
+        assert_eq!(o.cursor, 4);
+        o.backspace();
+        assert_eq!(o.text, "héllo");
+        o.delete();
+        assert_eq!(o.text, "hélo");
+        o.delete();
+        o.delete();
+        assert_eq!(o.text, "hél");
+        o.move_home();
+        o.backspace();
+        o.move_left();
+        assert_eq!((o.text.as_str(), o.cursor), ("hél", 0));
+        o.move_end();
+        o.move_right();
+        assert_eq!(o.cursor, 3);
     }
 
     #[test]
