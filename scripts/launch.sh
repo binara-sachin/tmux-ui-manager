@@ -17,6 +17,11 @@ if [ ! -x "$BINARY" ]; then
 	exit 0
 fi
 
+# Resolve the invoking client's session here, where run-shell still has the
+# client context; inside the popup `#{client_session}` can come back empty.
+CLIENT_SESSION="$(tmux display-message -p '#{session_id}' 2>/dev/null || true)"
+COMMAND="TMUX_UI_CLIENT_SESSION='$CLIENT_SESSION' '$BINARY'"
+
 WIDTH="${WIDTH:-90%}"
 HEIGHT="${HEIGHT:-85%}"
 
@@ -33,11 +38,11 @@ if [ "$MAJOR" -gt 3 ] || { [ "$MAJOR" -eq 3 ] && [ "$MINOR" -ge 4 ]; }; then
 		-s 'bg=#1e1e2e,fg=#cdd6f4' \
 		-S 'fg=#45475a' \
 		-T ' tmux :: manager ' \
-		"$BINARY"
+		"$COMMAND"
 else
 	exec tmux display-popup -E \
 		-w "$WIDTH" -h "$HEIGHT" \
 		-b rounded \
 		-T ' tmux :: manager ' \
-		"$BINARY"
+		"$COMMAND"
 fi

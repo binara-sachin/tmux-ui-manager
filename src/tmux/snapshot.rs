@@ -122,6 +122,13 @@ pub fn take_snapshot() -> Result<Snapshot, SnapshotError> {
 /// Absent (e.g. a detached/control invocation) is not an error — `Snapshot::client_session`
 /// is simply `None`.
 fn client_session_id() -> Result<Option<SessionId>, SnapshotError> {
+    // launch.sh resolves the session up front; inside a popup tmux often can't.
+    if let Ok(id) = std::env::var("TMUX_UI_CLIENT_SESSION") {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Ok(Some(SessionId::new(id.to_string())));
+        }
+    }
     let output = Command::new("tmux")
         .args(["display-message", "-p", "#{client_session}"])
         .output()

@@ -214,6 +214,10 @@ impl App {
             if let Some(pane_id) = active_pane {
                 app.selected_pane = Some(pane_id);
             }
+            // Put the cursor on the current window, not its session.
+            if app.snapshot.client_session.is_some() {
+                app.focus = Column::Windows;
+            }
         }
         app
     }
@@ -1714,6 +1718,7 @@ mod tests {
         assert_eq!(app.selected_session.as_ref().unwrap().as_target(), "$1");
         assert_eq!(app.selected_window.as_ref().unwrap().as_target(), "@2");
         assert_eq!(app.selected_pane.as_ref().unwrap().as_target(), "%3");
+        assert_eq!(app.focus, Column::Windows);
     }
 
     #[test]
@@ -1868,6 +1873,7 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.client_session = Some(SessionId::new("$1"));
         let mut app = App::new(snapshot);
+        app.focus = Column::Sessions;
         app.open_kill_confirm();
         match &app.mode {
             Mode::Confirm(overlay) => {
